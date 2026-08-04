@@ -950,8 +950,14 @@ class PublicScene(QtWidgets.QWidget):
         xs = np.linspace(x0, x1, n_x)
         zs = np.linspace(z1, z0, n_z)   # row 0 = z1 (top), matching origin='upper'
         try:
+            # Violet, not white: room_walls (views.py) is also a white
+            # dashed line, and a "before" contour in the same color reads
+            # as a duplicated/offset room wall rather than a temperature
+            # comparison. Violet is the one hue this scene doesn't already
+            # use for something else (fire is red/orange/yellow, door/vents
+            # are blue/green/amber, trail is gold).
             self._ghost_contour = self.view.ax.contour(
-                xs, zs, frame, levels=4, colors="#FFFFFF", alpha=0.6,
+                xs, zs, frame, levels=4, colors="#A78BFA", alpha=0.6,
                 linewidths=1.2, linestyles="dashed", zorder=9)
         except Exception:  # noqa: BLE001 - a degenerate (uniform) frame has no contours
             self._ghost_contour = None
