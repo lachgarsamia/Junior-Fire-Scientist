@@ -49,7 +49,11 @@ VELOCITY_KEY = SliceKey("VELOCITY", 1, 0)
 # axes actually is on screen -- getting these three out of sync is
 # exactly the "probe mismapping" bug this session already fixed once
 # (see _strip_chrome's own docstring).
-SCENE_WIDTH_FRAC = 0.76
+# 0.76 -> 0.70: direct feedback that the thermometer, squeezed into a
+# 24%-wide column, still read as cramped rather than a real instrument
+# (Design Review §6) -- a wider reserved column instead of tuning the
+# thermometer's own size again against too little room.
+SCENE_WIDTH_FRAC = 0.70
 
 # Candle body drawn at the real burner location (schematic._CANDLE_X,
 # the floor). Sized small relative to the 1.0 x 0.48 m domain -- an

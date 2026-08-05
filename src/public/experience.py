@@ -1083,9 +1083,33 @@ class PublicExperience(QtWidgets.QWidget):
         else:
             self.overlay.say(tr("candle_burning"), EXCITED)
 
+    def _current_factors(self) -> dict:
+        """The real, currently-loaded scenario's own factor values for
+        every exposed explore control, plus door -- the one factor none
+        of them varies, held at the same wide-open value every
+        ExploreControl.held dict already fixes it to. This is the
+        starting point _on_explore_changed composes a single change on
+        top of, so flipping one control keeps whatever the others are
+        already set to instead of resetting them to a baseline the
+        child may have already left (see _on_explore_changed's own
+        docstring). Falls back to every control's own default if
+        nothing is loaded yet."""
+        entry = self.scene.current_entry()
+        factors = {"door": 1}
+        for control in self._explore_controls:
+            factors[control.factor] = (getattr(entry, control.factor)
+                                       if entry is not None else control.default_value)
+        return factors
+
     def _on_explore_changed(self, control_key: str, value) -> None:
         """A free-play control was flipped: switch to the real matching
-        scenario immediately.
+        scenario immediately -- combined with whatever the *other*
+        controls are already set to, not reset against a fixed baseline.
+        Flipping Fan ON and then Vent SHUT resolves the real fan-on +
+        vent-shut scenario (the manifest has all combinations this
+        study's factors produce); it does not silently discard the fan
+        choice the way resolving against each control's own `held`
+        baseline used to. See _current_factors().
 
         Meaningful during OBSERVE and during a Games activity that shows
         the Fan/Candle toggles (Mystery/Compare/Map It); a signal from a
@@ -1100,10 +1124,11 @@ class PublicExperience(QtWidgets.QWidget):
         control = next((c for c in self._explore_controls if c.key == control_key), None)
         if control is None:
             return
-        case_index = control.case_for(self.sim_data.manifest, value)
+        factors = self._current_factors()
+        factors[control.factor] = value
+        case_index = experiments_mod.resolve_case_index(self.sim_data.manifest, factors)
         if case_index is None or case_index == self.state.case_index:
             return
-        self.overlay.reset_explore_controls(self._explore_controls, except_key=control_key)
         # Force the toggle's own new visual state onto the screen *now*,
         # before the potentially-expensive scene switch below (a full
         # canvas redraw through the cinema pipeline's layered artists can
@@ -1137,6 +1162,10 @@ class PublicExperience(QtWidgets.QWidget):
             for index, point in enumerate(self._before_trail):
                 self.scene.add_trail_marker(point["x"], point["z"], index + 1, dim=True,
                                             redraw=index == last)
+        # _label_for_case can now list more than one differing factor
+        # (see its own docstring) but only ever names them in words, no
+        # icon -- this control's own icon leads, same as before, since
+        # it is the one the child just touched.
         self._last_change = f"{control.icon} {self._label_for_case(case_index)}"
         # A short, physical reaction rather than a caption -- "the child
         # should see the consequence before reading any number" (Phase 3
@@ -1251,18 +1280,23 @@ class PublicExperience(QtWidgets.QWidget):
         self.time_controller.play()
 
     def _sync_explore_controls_to_case(self) -> None:
-        """Snap each toggle's visual state to whichever option (if any)
-        produced the scenario actually loaded right now -- not a blind
-        reset to defaults, which would desync the toggles from an
-        already-explored scenario every time OBSERVE re-renders without
-        a fresh baseline load (closing the Help or Compare detour)."""
-        values = {}
-        for control in self._explore_controls:
-            values[control.key] = next(
-                (opt.value for opt in control.options
-                 if control.case_for(self.sim_data.manifest, opt.value)
-                 == self.state.case_index),
-                control.default_value)
+        """Snap every toggle's visual state to the scenario actually
+        loaded right now -- read directly off its own factor value
+        (entry.vod, entry.candles, entry.voc), not a blind reset to
+        defaults, which would desync the toggles from an already-
+        explored scenario every time OBSERVE re-renders without a fresh
+        baseline load (closing the Help or Compare detour). Reads the
+        real entry rather than re-resolving through each control's own
+        case_for/held: since _on_explore_changed composes changes now
+        (see its own docstring), a loaded scenario can have more than
+        one factor away from baseline at once, which case_for -- built
+        to resolve a single factor against a fixed baseline -- has no
+        way to recognise."""
+        entry = self.scene.current_entry()
+        if entry is None:
+            return
+        values = {control.key: getattr(entry, control.factor, control.default_value)
+                 for control in self._explore_controls}
         self.overlay.set_explore_values(values)
 
     def _on_test_idea_clicked(self) -> None:
@@ -1281,14 +1315,25 @@ class PublicExperience(QtWidgets.QWidget):
         return self._case_measurements[case_index]
 
     def _label_for_case(self, case_index) -> str:
-        """A short, honest label for one explored scenario, derived from
-        whichever real ExploreControl/option actually produces it --
-        never a hardcoded "Before"/"After"."""
+        """A short, honest label for one explored scenario, listing every
+        factor that differs from the shared baseline (not just the one
+        the child last touched -- _on_explore_changed composes changes
+        now, so a case can be away from baseline on more than one
+        factor at once, e.g. "Fan ON, Vent SHUT"). Never a hardcoded
+        "Before"/"After". Falls back to a neutral label when nothing
+        differs (the baseline scenario itself)."""
+        entry = next((e for e in self.sim_data.manifest if e.case_index == case_index), None)
+        if entry is None:
+            return tr("this_scenario_fallback")
+        parts = []
         for control in self._explore_controls:
-            for option in control.options:
-                if control.case_for(self.sim_data.manifest, option.value) == case_index:
-                    return f"{control.label} {option.label}"
-        return tr("this_scenario_fallback")
+            value = getattr(entry, control.factor, None)
+            if value == control.default_value:
+                continue
+            option = next((o for o in control.options if o.value == value), None)
+            if option is not None:
+                parts.append(f"{control.label} {option.label}")
+        return ", ".join(parts) if parts else tr("this_scenario_fallback")
 
     def _add_why_button(self, explanation: str) -> None:
         """A one-shot "❓ Why?" reveal, offered only after a real

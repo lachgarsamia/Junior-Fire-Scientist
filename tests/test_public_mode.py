@@ -34,6 +34,7 @@ from public import kid_language as kid
 from public.state import Phase, PublicState
 from public.story import StoryController
 from public.mascot import Mascot
+from public.scene import SCENE_WIDTH_FRAC
 from public.widgets import BarCompare, BigButton, HeroMetric, SecondaryMetric
 from slice_key import DEFAULT_SLICE_KEY, SliceKey
 
@@ -2875,25 +2876,34 @@ class TestExploreControls:
         experience._on_explore_changed("fan", 999)
         assert experience.state.case_index == before
 
-    def test_only_one_factor_differs_from_baseline_at_a_time(self, experience):
-        """Flipping a second control resets the first back to its
-        default -- the UI must never imply an uncommunicated combination
-        of changes. Driven through the real widgets (a click), not the
-        handler directly, so this also proves the toggle's own visual
-        state is what actually gets reset."""
+    def test_factor_changes_compose_instead_of_resetting_each_other(self, experience):
+        """Flipping a second (and third) control must keep whatever the
+        others are already set to and land on the real combined
+        scenario -- the manifest has every combination these three
+        controls can reach. Driven through the real widgets (a click),
+        not the handler directly, so this also proves the toggles' own
+        visual state stays composed, not just the resolved case_index."""
         experience._begin_journey()
         experience._start_observe()
         fan_toggle = experience.overlay._explore_toggles["fan"]
         candles_toggle = experience.overlay._explore_toggles["candles"]
+        vent2_toggle = experience.overlay._explore_toggles["vent2"]
 
         fan_toggle._group.button(1).click()   # "ON"
         assert fan_toggle._group.checkedId() == 1
 
         candles_toggle._group.button(1).click()   # "2 candles"
-        assert fan_toggle._group.checkedId() == 0   # back to "OFF"
+        assert fan_toggle._group.checkedId() == 1   # still ON, not reset
         entry = next(e for e in experience.sim_data.manifest
                      if e.case_index == experience.state.case_index)
-        assert entry.vod == 0 and entry.candles == 1
+        assert entry.vod == 2 and entry.candles == 1
+
+        vent2_toggle._group.button(1).click()   # "SHUT"
+        assert fan_toggle._group.checkedId() == 1        # still ON
+        assert candles_toggle._group.checkedId() == 1    # still 2 candles
+        entry = next(e for e in experience.sim_data.manifest
+                     if e.case_index == experience.state.case_index)
+        assert entry.vod == 2 and entry.candles == 1 and entry.voc == 1
 
     def test_explore_only_acts_during_observe(self, experience):
         experience._begin_journey()   # phase is INTRO
@@ -5122,7 +5132,7 @@ class TestTemperatureTrail:
         experience._enter_game_map()
         canvas = experience.scene.view.canvas
         first = QtCore.QPoint(canvas.width() // 4, canvas.height() // 4)
-        second = QtCore.QPoint(3 * canvas.width() // 4, 3 * canvas.height() // 4)
+        second = QtCore.QPoint(int(3 * canvas.width() * SCENE_WIDTH_FRAC // 4), 3 * canvas.height() // 4)
         x1, z1, v1 = experience.scene.probe_at(first)
         experience._on_overlay_tapped(first)
         x2, z2, v2 = experience.scene.probe_at(second)
@@ -5141,7 +5151,7 @@ class TestTemperatureTrail:
         experience._start_observe()
         experience._enter_game_map()
         canvas = experience.scene.view.canvas
-        first = QtCore.QPoint(3 * canvas.width() // 4, canvas.height() // 4)
+        first = QtCore.QPoint(int(3 * canvas.width() * SCENE_WIDTH_FRAC // 4), canvas.height() // 4)
         experience._on_overlay_tapped(first)
         assert experience.scene._trail_line is None   # one point: nothing to join yet
 
@@ -5159,7 +5169,7 @@ class TestTemperatureTrail:
         canvas = experience.scene.view.canvas
         experience._on_overlay_tapped(QtCore.QPoint(canvas.width() // 4, canvas.height() // 4))
         experience._on_overlay_tapped(
-            QtCore.QPoint(3 * canvas.width() // 4, 3 * canvas.height() // 4))
+            QtCore.QPoint(int(3 * canvas.width() * SCENE_WIDTH_FRAC // 4), 3 * canvas.height() // 4))
         assert experience.scene._trail_line is not None
 
         experience._on_clear_trail_requested()
@@ -5182,7 +5192,7 @@ class TestTemperatureTrail:
             qapp.processEvents()
         assert experience._before_trail
 
-        far = QtCore.QPoint(3 * canvas.width() // 4, 3 * canvas.height() // 4)
+        far = QtCore.QPoint(int(3 * canvas.width() * SCENE_WIDTH_FRAC // 4), 3 * canvas.height() // 4)
         experience._on_overlay_tapped(far)
 
         # Only one *current* point exists post-switch -- the before point
@@ -5276,7 +5286,7 @@ class TestTemperatureTrail:
             qapp.processEvents()
         assert experience._before_trail
 
-        far = QtCore.QPoint(3 * canvas.width() // 4, 3 * canvas.height() // 4)
+        far = QtCore.QPoint(int(3 * canvas.width() * SCENE_WIDTH_FRAC // 4), 3 * canvas.height() // 4)
         experience._on_overlay_tapped(far)
 
         assert not experience._compare_open
@@ -5294,7 +5304,7 @@ class TestTemperatureTrail:
             qapp.processEvents()
         assert len(experience._before_trail) == 1
 
-        far = QtCore.QPoint(3 * canvas.width() // 4, 3 * canvas.height() // 4)
+        far = QtCore.QPoint(int(3 * canvas.width() * SCENE_WIDTH_FRAC // 4), 3 * canvas.height() // 4)
         experience._on_overlay_tapped(far)
 
         labels = [label.get_text() for _marker, label in experience.scene._trail_markers]

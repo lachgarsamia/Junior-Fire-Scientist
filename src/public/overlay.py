@@ -62,6 +62,7 @@ class PublicOverlay(QtWidgets.QWidget):
         self._explore_toggles: dict = {}
         self._fan_marker_frac = None
         self._thermometer_anchor_frac = None
+        self._thermometer_reposition_timer = None
 
         root = QtWidgets.QVBoxLayout(self)
         # Bottom margin reserves the band the mascot and its speech
@@ -369,8 +370,37 @@ class PublicOverlay(QtWidgets.QWidget):
             # stay collision-free -- see _position_thermometer.
             self._position_thermometer()
             self.thermometer.raise_()
+            # The meter chips' own sizeHint-driven geometry (read by
+            # _position_thermometer's `top`) isn't always final the
+            # instant set_meters_visible() returns -- Qt can defer a
+            # child layout's own relayout by one event-loop turn past
+            # the parent's activate(). Caught as a real, measured bug:
+            # this call's own `top` used a stale (larger) meter-bottom
+            # value, which _position_thermometer's height formula then
+            # read as "less room available" than genuinely exists,
+            # capping the thermometer shorter than it needed to be. One
+            # deferred re-run corrects it once everything has settled;
+            # guarded so a rapid run of phase changes never stacks more
+            # than one pending correction.
+            if self._thermometer_reposition_timer is None:
+                # Parented to self, not a bare QTimer.singleShot(): a
+                # bare one-shot's callback still fires even after this
+                # widget is destroyed (between one test's teardown and
+                # the next, or a real exit-public-mode) -- PublicExperience.
+                # _defer already established this same fix elsewhere in
+                # the public package; this mirrors it rather than
+                # reintroducing the crash risk it exists to avoid.
+                self._thermometer_reposition_timer = QtCore.QTimer(self)
+                self._thermometer_reposition_timer.setSingleShot(True)
+                self._thermometer_reposition_timer.timeout.connect(
+                    self._reposition_thermometer_once_settled)
+            self._thermometer_reposition_timer.start(0)
         else:
             self.thermometer.clear()
+
+    def _reposition_thermometer_once_settled(self) -> None:
+        if self.thermometer.isVisible():
+            self._position_thermometer()
 
     def update_thermometer(self, value_c: float, caption: str) -> None:
         self.thermometer.set_reading(value_c, caption)
@@ -485,26 +515,14 @@ class PublicOverlay(QtWidgets.QWidget):
     def set_explore_values(self, values: dict) -> None:
         """Snap each toggle's checked state to an explicit value per
         control key -- used to keep the toggle UI in sync with whatever
-        scenario is actually loaded when OBSERVE re-renders without a
-        fresh baseline load (e.g. closing the Help or Compare detour
-        mid-exploration, where reset_explore_controls's blind defaults
-        would otherwise desync the toggles from the scenario actually
-        on screen)."""
+        real, possibly multi-factor scenario is actually loaded (see
+        PublicExperience._sync_explore_controls_to_case), including
+        right after a change composes on top of the others rather than
+        resetting them (PublicExperience._on_explore_changed)."""
         for key, value in values.items():
             toggle = self._explore_toggles.get(key)
             if toggle is not None:
                 toggle.set_value_silently(value)
-
-    def reset_explore_controls(self, controls: list, except_key: str = "") -> None:
-        """Snap every control except `except_key` back to its default
-        value -- keeps the one-factor-at-a-time rule honest in the UI,
-        not just in the resolver (see ExploreControl's docstring)."""
-        for control in controls:
-            if control.key == except_key:
-                continue
-            toggle = self._explore_toggles.get(control.key)
-            if toggle is not None:
-                toggle.set_value_silently(control.default_value)
 
     def set_explore_visible(self, visible: bool) -> None:
         self.explore_panel.setVisible(visible and bool(self._explore_toggles))
@@ -648,10 +666,21 @@ class PublicOverlay(QtWidgets.QWidget):
         self._position_fan_marker()
         self._position_mascot()
 
-    # Reserved below the thermometer -- kept out of its own height budget
-    # so there's always a clear gap above the stage strip/card, regardless
-    # of how tall the thermometer itself ends up.
-    _PROBE_DOCK_RESERVE = 104
+    # Extra clearance below the thermometer's computed bottom edge, on
+    # top of bottom_limit's own margin -- bottom_limit already stops it
+    # short of the stage strip (StageStrip really is visible, not dead
+    # chrome, during EXPERIMENT/REVEAL/SCIENCE -- confirmed by checking
+    # its actual isVisible()/geometry() in those phases, not assumed),
+    # so this is a second, smaller safety margin, not the only one.
+    # 104 -> 70 -> 20: the thermometer read as squeezed and, worse,
+    # after the first trim its painted tube (_paint_tube) silently
+    # stopped drawing at all below ~310px tall -- caught in a
+    # screenshot, not by reasoning about the numbers -- because the
+    # `top` this reserve gets subtracted from used to be measured before
+    # the meter chips' own layout had actually settled (see
+    # set_thermometer_visible's deferred re-position), overstating how
+    # little room this control has to work with.
+    _PROBE_DOCK_RESERVE = 20
 
     def set_thermometer_anchor(self, frac_x) -> None:
         """The room's own real right-wall x, as a fraction of this
@@ -687,7 +716,13 @@ class PublicOverlay(QtWidgets.QWidget):
             # its bottom too, not just an arbitrary small margin.
             top = self.exit_button.geometry().bottom() + 12
         bottom_limit = (self.stages.y() if self.stages.y() > 0 else self.height()) - 20
-        height = max(220, min(380, bottom_limit - self._PROBE_DOCK_RESERVE - top))
+        # 380 -> 460: direct feedback that the thermometer read as
+        # squeezed -- raises the ceiling this can grow to when the
+        # sibling geometry (meters/stage strip) actually leaves the
+        # room; the max()/min() clamp already keeps it from overflowing
+        # whatever room there really is, so this only matters when
+        # there's more of it to use.
+        height = max(220, min(460, bottom_limit - self._PROBE_DOCK_RESERVE - top))
         anchor = self._thermometer_anchor_frac
         if anchor is not None:
             # Docked just outside the room's real right wall, not

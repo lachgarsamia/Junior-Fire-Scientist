@@ -209,14 +209,20 @@ class ExploreControl:
     Choice, so a control can never point at a scenario this study
     doesn't have.
 
-    Deliberate simplification: `held` fixes every *other* factor at one
-    canonical baseline value, so flipping one control always changes
-    exactly one thing from a known-good reference -- it does not compose
-    with another control's own change (flipping the fan afterward does
-    not remember a candle-count change made a moment earlier). For a
-    from-a-baseline exhibit that is the honest choice: a visitor always
-    knows, without reading anything, that "this one thing is different
-    from normal" rather than tracking an unlabelled combination.
+    Changes compose: flipping the fan and then the vent lands on the
+    real fan-on + vent-shut scenario, not a reset back to a fixed
+    reference (this study's own factorial has every combination these
+    controls can reach -- see EXPLORE_CONTROLS' own comment). The
+    composition itself lives in PublicExperience._on_explore_changed/
+    _current_factors, not here: this dataclass only describes one
+    control's own key/label/factor/options.
+
+    `held` is this control's baseline -- every *other* exposed factor's
+    default value, used only to check the control is actually usable at
+    all (is_available, below) and as case_for's fixed-baseline
+    resolution, which is still what _current_factors falls back to
+    before any scenario has been loaded yet. It is not consulted by the
+    live compose-on-top-of-what's-already-loaded path once one is.
     """
     key: str
     label_key: str
@@ -234,6 +240,11 @@ class ExploreControl:
         return self.options[0].value if self.options else None
 
     def case_for(self, manifest: list, value) -> Optional[int]:
+        """This control's own factor at `value`, every other exposed
+        factor at its baseline (`held`) -- used for availability checks
+        and as a before-anything-is-loaded fallback, not the live
+        compose-with-whatever-else-is-set path (see the class
+        docstring)."""
         return resolve_case_index(manifest, {**self.held, self.factor: value})
 
     def is_available(self, manifest: list) -> bool:

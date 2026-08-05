@@ -292,19 +292,29 @@ class Thermometer(QtWidgets.QWidget):
         self._anim.setDuration(280)
         self._anim.setEasingCurve(QtCore.QEasingCurve.OutCubic)
         self._anim.valueChanged.connect(self._on_anim_value)
-        # 200 -> 232 -> 184: the painted tube below (see _paint_tube) was
-        # thin relative to this widget's own footprint and read as a flat
-        # HUD chip rather than an instrument (Design Review §6) -- first
-        # widened to give the enlarged tube/bulb room, then pulled back
-        # in once the scene itself stopped rendering full-bleed
-        # (PublicScene.SCENE_WIDTH_FRAC) specifically to give this widget
-        # a real, dedicated, never-drawn-into column -- 232 didn't
-        # comfortably fit that column's own width. All positioning that
-        # depends on this width (PublicOverlay._position_thermometer)
+        # 200 -> 232 -> 184 -> 216: the painted tube below (see
+        # _paint_tube) was thin relative to this widget's own footprint
+        # and read as a flat HUD chip rather than an instrument (Design
+        # Review §6) -- first widened, then pulled back in to fit inside
+        # the scene's own reserved never-drawn-into column
+        # (PublicScene.SCENE_WIDTH_FRAC) once that existed, then widened
+        # again once direct feedback said that column-fitted size still
+        # read as squeezed (the column itself grew wider at the same
+        # time -- see SCENE_WIDTH_FRAC's own comment). All positioning
+        # that depends on this width (PublicOverlay._position_thermometer)
         # already reads self.thermometer.width() rather than a hardcoded
         # constant, so this is a pure size change, not a layout rewrite.
-        self.setFixedWidth(184)
-        self.setMinimumHeight(360)
+        self.setFixedWidth(216)
+        # Left at 220 (PublicOverlay._position_thermometer's own floor),
+        # not raised further: a first attempt at 400 forced this widget
+        # taller than _position_thermometer's own bottom_limit-derived
+        # safety math allowed at the moment top happens to be large (the
+        # meter chips' text length shifts it run to run) -- a real,
+        # screenshotted overflow where the readout box ran off the
+        # bottom of an 800x600 screen. That formula's own max() cap is
+        # what actually has to grow to make this taller safely; see its
+        # comment in overlay.py.
+        self.setMinimumHeight(220)
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
