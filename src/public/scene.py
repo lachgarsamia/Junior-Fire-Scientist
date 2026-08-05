@@ -399,7 +399,15 @@ class PublicScene(QtWidgets.QWidget):
         cinema pipeline's own flame rendering (zorder 9) so the two
         visually fuse into one fire rather than sitting side by side."""
         patches = []
-        glow_r = _FLAME_HEIGHT_M * 1.15
+        # 1.15 -> 1.6: with the fan on, the real cinema-rendered flame
+        # leans in the crossflow's direction -- real, measured drift, not
+        # something to fake away (verified: fan off, the real flame rises
+        # straight over the candle and the two already fuse; fan on, it
+        # leans and the small glow no longer reached far enough sideways
+        # to still overlap it). A wider glow keeps "the candle is where
+        # this fire comes from" true across that real range of lean
+        # instead of only in the still-air case.
+        glow_r = _FLAME_HEIGHT_M * 1.6
         glow = Circle((cx, base_z + _FLAME_HEIGHT_M * 0.5), glow_r,
                       facecolor="#FF7A18", edgecolor="none", alpha=0.22, zorder=8)
         self.view.ax.add_patch(glow)
