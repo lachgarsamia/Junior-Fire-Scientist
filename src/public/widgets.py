@@ -292,7 +292,15 @@ class Thermometer(QtWidgets.QWidget):
         self._anim.setDuration(280)
         self._anim.setEasingCurve(QtCore.QEasingCurve.OutCubic)
         self._anim.valueChanged.connect(self._on_anim_value)
-        self.setFixedWidth(200)
+        # 200 -> 232: the painted tube below (see _paint_tube) was thin
+        # relative to this widget's own footprint and read as a flat HUD
+        # chip rather than an instrument (Design Review §6) -- widened to
+        # give the enlarged tube/bulb room without crowding the numeric
+        # readout beside it. All positioning that depends on this width
+        # (PublicOverlay._position_thermometer) already reads
+        # self.thermometer.width() rather than a hardcoded 200, so this
+        # is a pure size change, not a layout rewrite.
+        self.setFixedWidth(232)
         self.setMinimumHeight(360)
 
         layout = QtWidgets.QVBoxLayout(self)
@@ -323,8 +331,9 @@ class Thermometer(QtWidgets.QWidget):
         self._value_label = QtWidgets.QLabel("—")
         self._value_label.setAlignment(QtCore.Qt.AlignCenter)
         self._value_label.setStyleSheet(
-            f"color: {TEXT}; font-size: 42px; font-weight: 800;"
-            "background: rgba(10, 13, 20, 210); border-radius: 14px; padding: 4px 6px;")
+            f"color: {TEXT}; font-size: 48px; font-weight: 800;"
+            f"background: rgba(10, 13, 20, 210); border: 2px solid {DELIGHT};"
+            "border-radius: 14px; padding: 4px 6px;")
         layout.addWidget(self._value_label)
 
         self._phrase_label = QtWidgets.QLabel("")
@@ -387,8 +396,13 @@ class Thermometer(QtWidgets.QWidget):
     _TICKS = (400, 300, 200, 100, 0)
 
     def _paint_tube(self, painter: QtGui.QPainter) -> None:
-        tube_w = 34
-        bulb_r = 20.0
+        # 34/20 -> 48/28: Design Review §6 -- "reads as a flat HUD chip,
+        # not an instrument" -- room_wall_anchor already docks this
+        # correctly against the room's real wall (verified independently
+        # against PublicExperience._update_markers), so the fix here is
+        # purely more visual weight for the tube/bulb themselves.
+        tube_w = 48
+        bulb_r = 28.0
         top = 132
         bottom_limit = self.height() - 118
         bottom = bottom_limit - (2 * bulb_r + 4)
@@ -423,7 +437,12 @@ class Thermometer(QtWidgets.QWidget):
         painter.setBrush(fill_color)
         painter.drawEllipse(bulb_center, bulb_r, bulb_r)
 
-        painter.setPen(QtGui.QPen(QtGui.QColor(PANEL_BORDER), 2.0))
+        # A warm, toy-instrument outline (DELIGHT, the app's one other
+        # bright hue -- see its own module docstring) instead of the
+        # plain translucent-white PANEL_BORDER every flat panel already
+        # uses: this is the one widget the child should read as a real
+        # object, not another info chip (Design Review §6).
+        painter.setPen(QtGui.QPen(QtGui.QColor(DELIGHT), 3.0))
         painter.setBrush(QtGui.QColor(10, 13, 20, 210))
         painter.drawRoundedRect(rect, tube_w / 2, tube_w / 2)
 
