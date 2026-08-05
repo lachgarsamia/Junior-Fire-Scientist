@@ -2314,9 +2314,14 @@ class TestPublicModeIntegration:
 
             window.exit_public_mode()
             assert not window.is_public_mode()
-            assert window.root_stack.currentWidget() is window.shell_widget
-            assert not window.menuBar().isHidden()
-            assert not window.statusBar().isHidden()
+            # Deliberate exit lands on the Welcome landing page, not the
+            # researcher shell -- the ✕ affordance must leave no route
+            # back to research state (see main_window.exit_public_mode).
+            assert window.root_stack.currentWidget() is window.welcome_widget
+            # Researcher chrome must stay hidden on Welcome too: exiting
+            # public mode must never quietly re-expose it.
+            assert window.menuBar().isHidden()
+            assert window.statusBar().isHidden()
         finally:
             window.close()
 
