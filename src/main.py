@@ -26,7 +26,15 @@ def _icon_or_none(filename: str) -> QtGui.QIcon:
 
 
 def main():
-    app = QtWidgets.QApplication(sys.argv)
+    # `--public` boots straight into the Fire Explorer, for an unattended
+    # exhibition machine: a kiosk should never come up showing the
+    # researcher UI, however briefly. Parsed by hand rather than with
+    # argparse to keep every other Qt argument passing through to
+    # QApplication untouched.
+    public_mode = "--public" in sys.argv
+    qt_argv = [a for a in sys.argv if a != "--public"]
+
+    app = QtWidgets.QApplication(qt_argv)
     # Native styles (e.g. macOS Aqua) paint *disabled* controls themselves
     # and ignore the app's QSS entirely for that state -- a QComboBox with
     # only one option (disabled) stayed a stray native-white pill under the
@@ -78,6 +86,10 @@ def main():
         splash.close()
 
     window.show()
+    if public_mode:
+        # After show(), so the experience's scene has a real size to lay
+        # its first frame out against.
+        window.enter_public_mode()
     sys.exit(app.exec_())
 
 

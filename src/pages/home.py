@@ -17,9 +17,11 @@ from pages.base import Page
 class HomePage(Page):
     title = "Home"
 
-    def __init__(self, on_start: Optional[Callable[[], None]] = None, parent=None):
+    def __init__(self, on_start: Optional[Callable[[], None]] = None,
+                 on_public: Optional[Callable[[], None]] = None, parent=None):
         super().__init__(parent)
         self._on_start = on_start
+        self._on_public = on_public
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(48, 48, 48, 48)
@@ -46,9 +48,19 @@ class HomePage(Page):
         self.start_button.setObjectName("primaryButton")
         self.start_button.setFixedWidth(220)
         self.start_button.clicked.connect(self._on_start_clicked)
+        # Public mode entry. Sits beside the researcher CTA rather than
+        # in the nav rail, because it swaps out the whole shell (see
+        # MainWindow.enter_public_mode) instead of switching pages.
+        self.public_button = QtWidgets.QPushButton("🔥  Fire Explorer (public)")
+        self.public_button.setFixedWidth(260)
+        self.public_button.setToolTip(
+            "Open the visitor-facing Fire Explorer. Leave it with Ctrl+Shift+R.")
+        self.public_button.clicked.connect(self._on_public_clicked)
+
         button_row = QtWidgets.QHBoxLayout()
         button_row.addStretch(1)
         button_row.addWidget(self.start_button)
+        button_row.addWidget(self.public_button)
         button_row.addStretch(1)
         layout.addLayout(button_row)
 
@@ -85,3 +97,7 @@ class HomePage(Page):
     def _on_start_clicked(self) -> None:
         if self._on_start is not None:
             self._on_start()
+
+    def _on_public_clicked(self) -> None:
+        if self._on_public is not None:
+            self._on_public()

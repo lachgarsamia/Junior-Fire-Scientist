@@ -984,7 +984,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.analytics_panel.hide()
 
         self.pages = {
-            "home": HomePage(on_start=lambda: self._navigate_to("live")),
+            "home": HomePage(on_start=lambda: self._navigate_to("live"),
+                             on_public=self.enter_public_mode),
             "live": LivePage(live_content, self.time_controller, settings=self.settings),
             "compare": ComparePage(on_preset=self._apply_compare_preset),
             "dataset": DatasetPage(dataset_content),
@@ -1060,7 +1061,22 @@ class MainWindow(QtWidgets.QMainWindow):
         shell_layout.setSpacing(0)
         shell_layout.addWidget(self.nav_rail)
         shell_layout.addWidget(self.page_stack, 1)
-        self.setCentralWidget(shell)
+
+        # Public mode (Fire Explorer) is a *root-level* experience, not a
+        # nav-rail page: a page cannot hide the rail or the menu bar, and
+        # both are one click away from Open Study…, Export and the
+        # analysis panels -- exactly what a public exhibit must not expose.
+        # So the central widget is a two-entry stack, and the researcher
+        # shell above is built and wired exactly as it was before.
+        # PublicExperience itself is constructed lazily on first entry
+        # (it runs event detection and warms scenarios), so the researcher
+        # app's startup cost is unchanged.
+        self.shell_widget = shell
+        self.public_experience = None
+        self.welcome_widget = None
+        self.root_stack = QtWidgets.QStackedWidget()
+        self.root_stack.addWidget(shell)
+        self.setCentralWidget(self.root_stack)
 
         self._build_evidence_notebook()
         self._build_sessions()
@@ -1388,6 +1404,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.energy_panel.ensure_loaded()
 
     def _navigate_to(self, key: str) -> None:
+        # While the public experience is on screen the researcher shell is
+        # hidden behind it; a stray 1-7 shortcut must not quietly
+        # rearrange it (or resume its playback) underneath a visitor.
+        if self.is_public_mode():
+            return
         page = self.pages.get(key)
         if page is None:
             return
@@ -1414,6 +1435,79 @@ class MainWindow(QtWidgets.QMainWindow):
         # selection/time (hidden panels skip live updates for performance).
         if getattr(self, "selection_bus", None) is not None:
             self.selection_bus.resend()
+
+    # -------------------------------------------------- public mode (Fire Explorer)
+    def enter_public_mode(self) -> None:
+        """Swap the whole researcher shell out for the public experience.
+
+        Everything that could take a visitor somewhere unintended -- the
+        menu bar, the nav rail (via the shell), the status bar -- is
+        hidden here rather than merely covered, and the kiosk idle
+        callbacks are repointed at the experience's own reset so an
+        abandoned session returns to attract instead of navigating the
+        researcher app underneath. Research state is left completely
+        untouched: exiting restores exactly what was on screen.
+        """
+        if self.public_experience is None:
+            from public.experience import PublicExperience
+            self.public_experience = PublicExperience(self.sim_data, self)
+            self.public_experience.exit_requested.connect(self.exit_public_mode)
+            self.root_stack.addWidget(self.public_experience)
+
+        self.time_controller.pause()
+        self._kiosk_callbacks_saved = (self._kiosk._on_idle, self._kiosk._on_wake)
+        self._kiosk._on_idle = self.public_experience.reset
+        self._kiosk._on_wake = lambda: None
+
+        self.menuBar().setVisible(False)
+        self.statusBar().setVisible(False)
+        self.root_stack.setCurrentWidget(self.public_experience)
+        self.public_experience.enter()
+        self.public_experience.setFocus()
+        if not self.isFullScreen():
+            self._was_windowed_before_public = True
+            self.showFullScreen()
+
+    def exit_public_mode(self) -> None:
+        """Deliberate exit only -- the ✕ affordance or Ctrl+Shift+R.
+
+        Lands on the Welcome landing page, never the researcher shell --
+        a visitor pressing ✕ must have no route back to research state.
+        (Grown-ups access is a separate, not-yet-built path off Welcome
+        itself, not something this function should shortcut to.)
+        """
+        if self.public_experience is None:
+            return
+        self.public_experience.leave()
+        saved = getattr(self, "_kiosk_callbacks_saved", None)
+        if saved is not None:
+            self._kiosk._on_idle, self._kiosk._on_wake = saved
+            self._kiosk_callbacks_saved = None
+
+        self._show_welcome()
+        if getattr(self, "_was_windowed_before_public", False):
+            self._was_windowed_before_public = False
+            self.showNormal()
+
+    def _show_welcome(self) -> None:
+        """Show the landing page -- lazily constructed once, the same
+        construct-once-then-reuse pattern enter_public_mode already uses
+        for public_experience. Explicitly re-hides the menu/status bar
+        (rather than assuming they're already hidden) for the same
+        reason enter_public_mode does: this must never be the place a
+        researcher affordance quietly stays visible."""
+        if self.welcome_widget is None:
+            from public.welcome import WelcomeWidget
+            self.welcome_widget = WelcomeWidget(on_kids=self.enter_public_mode, parent=self)
+            self.root_stack.addWidget(self.welcome_widget)
+        self.welcome_widget.retranslate()
+        self.menuBar().setVisible(False)
+        self.statusBar().setVisible(False)
+        self.root_stack.setCurrentWidget(self.welcome_widget)
+
+    def is_public_mode(self) -> bool:
+        return (self.public_experience is not None
+                and self.root_stack.currentWidget() is self.public_experience)
 
     def _reset_grid_after_compare(self) -> None:
         """Bugfix: leaving a Compare preset's comparison grid (2x1, two
@@ -3933,6 +4027,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.time_controller.pause()
 
     def _restart_simulation(self):
+        if self.is_public_mode():
+            return
         self.time_controller.restart()
 
     # ------------------------------------------------------------- theming
@@ -4019,6 +4115,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def _setup_shortcuts(self):
         QtWidgets.QShortcut(QtGui.QKeySequence("F11"), self, activated=self._toggle_fullscreen)
         QtWidgets.QShortcut(QtGui.QKeySequence("Space"), self, activated=self._toggle_play_pause)
+        # Public mode's only exit gesture. Deliberately awkward: a visitor
+        # must not be able to reach the researcher app by mashing keys,
+        # which is also why _navigate_to/_toggle_play_pause/_restart_simulation
+        # below no-op while public mode is on screen.
+        QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+Shift+R"), self,
+                            activated=self.exit_public_mode)
         QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+R"), self, activated=self._restart_simulation)
         QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+Q"), self, activated=self.close)
         # M1.4.3: frame/second stepping while paused or playing.
@@ -4100,6 +4202,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.showFullScreen()
 
     def _toggle_play_pause(self):
+        if self.is_public_mode():
+            return
         if self.time_controller.is_playing():
             self._stop_simulation()
         else:
@@ -4189,4 +4293,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # here rather than left to Python GC timing (see kiosk.py's
         # shutdown() docstring for the measured cost of skipping this).
         self._kiosk.shutdown()
+        # Same rule as the kiosk filter above: the public experience owns
+        # a playback clock and a mascot animation timer, and a QTimer
+        # keeps firing after its Python owner goes out of scope.
+        if self.public_experience is not None:
+            self.public_experience.shutdown()
         super().closeEvent(event)
