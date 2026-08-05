@@ -136,18 +136,26 @@ _VENT2_CLOSED_ANGLE = 0.0                 # flush, horizontal
 _VENT2_OPEN_ANGLE = math.pi / 5           # tilted open
 
 
-def _flame_vertices(cx: float, base_z: float, height: float, width_ratio: float = 0.42) -> list:
+def _flame_vertices(cx: float, base_z: float, height: float, width_ratio: float = 0.42,
+                    lean: float = 0.0) -> list:
     """A rounded teardrop outline, `height` above (cx, base_z) -- the data-
-    coordinate equivalent of schematic.py's QPainterPath flame shape."""
+    coordinate equivalent of schematic.py's QPainterPath flame shape.
+
+    `lean` shifts the *body* of the flame sideways by that many metres,
+    growing from 0 at the base (still rooted at the real wick position)
+    to the full amount at the tip -- a candle flame's base doesn't move
+    in a draft, only the body above it bends. See PublicScene.
+    _flame_lean_for for where this number comes from: a real measured
+    offset, never a decorative animation."""
     w = height * width_ratio
     return [
-        (cx, base_z + height),
-        (cx + w * 0.55, base_z + height * 0.55),
-        (cx + w, base_z + height * 0.12),
+        (cx + lean, base_z + height),
+        (cx + w * 0.55 + lean * 0.75, base_z + height * 0.55),
+        (cx + w + lean * 0.3, base_z + height * 0.12),
         (cx + w * 0.32, base_z),
         (cx - w * 0.32, base_z),
-        (cx - w, base_z + height * 0.12),
-        (cx - w * 0.55, base_z + height * 0.55),
+        (cx - w + lean * 0.3, base_z + height * 0.12),
+        (cx - w * 0.55 + lean * 0.75, base_z + height * 0.55),
     ]
 
 
@@ -211,7 +219,7 @@ class PublicScene(QtWidgets.QWidget):
         # frame costs nothing extra -- and it means the flame correctly
         # freezes along with everything else when playback is paused,
         # rather than visibly flickering over a frozen scene.
-        self._flame_layers_anim: list = []   # (patch, cx, base_z, base_height)
+        self._flame_layers_anim: list = []   # (patch, cx, base_z, base_height, lean)
         self._flame_glows: list = []         # (patch, base_radius)
         # A brief extra-amplitude boost applied on top of the normal
         # flicker -- decays over the next few real frames. Purely a "the
@@ -391,24 +399,61 @@ class PublicScene(QtWidgets.QWidget):
         # tick, these are baked into the background once per scenario.
         self.view.canvas.capture_background()
 
+    def _flame_lean_for(self, cx: float, base_z: float) -> float:
+        """How far sideways (metres) the real hot plume actually drifts
+        from the candle's true x, measured directly from this scenario's
+        own settled (last-frame) temperature field at roughly mid-flame
+        height -- never a decorative animation, and never assumed to
+        point any particular way. Still air (fan off) measures ~0 here;
+        a fan's real crossflow genuinely bends a real flame sideways,
+        which is what this reads off the actual data (see _draw_flame's
+        own docstring for why the shape should follow it rather than
+        stay artificially straight). Clamped so a noisy or edge-of-
+        domain read can't fling the flame shape somewhere absurd.
+        """
+        if self._temperature is None or self.view._extent is None:
+            return 0.0
+        frame = self._temperature[-1]
+        x0, x1, z0, z1 = self.view._extent
+        n_z, n_x = frame.shape
+        if x1 == x0 or z1 == z0:
+            return 0.0
+        sample_z = base_z + _FLAME_HEIGHT_M * 0.6
+        row = max(0, min(n_z - 1, int(round((z1 - sample_z) / (z1 - z0) * (n_z - 1)))))
+        search_m = 0.12
+        lo_col = int(round((max(x0, cx - search_m) - x0) / (x1 - x0) * (n_x - 1)))
+        hi_col = int(round((min(x1, cx + search_m) - x0) / (x1 - x0) * (n_x - 1)))
+        lo_col, hi_col = min(lo_col, hi_col), max(lo_col, hi_col)
+        if hi_col <= lo_col:
+            return 0.0
+        band = frame[row, lo_col:hi_col + 1]
+        peak_col = lo_col + int(np.argmax(band))
+        peak_x = x0 + peak_col / (n_x - 1) * (x1 - x0)
+        return max(-search_m, min(peak_x - cx, search_m))
+
     def _draw_flame(self, cx: float, base_z: float) -> list:
         """A small layered flame (glow + three warm-to-hot polygons)
         rooted at the wick tip -- schematic.py's SchematicWidget draws
         the same three-layer idea with QPainter; this is the matplotlib
         equivalent, in physical (x, z) data units, drawn on top of the
         cinema pipeline's own flame rendering (zorder 9) so the two
-        visually fuse into one fire rather than sitting side by side."""
+        visually fuse into one fire rather than sitting side by side.
+
+        A first attempt only widened the soft background glow to cover
+        a fan-driven lean. That was not enough: the glow is a faint,
+        translucent halo (alpha 0.22) sitting *behind* the bright,
+        opaque teardrop layers a viewer's eye actually reads as "the
+        flame" -- and those stayed perfectly vertical regardless, so
+        the small icon still looked like a straight candle sitting next
+        to a separate, leaning fire. _flame_lean_for measures the real
+        drift once per scenario; both the bright layers (via
+        _flame_vertices' own lean parameter, base rooted at the real
+        wick, only the body bends) and the glow's centre now follow it.
+        """
         patches = []
-        # 1.15 -> 1.6: with the fan on, the real cinema-rendered flame
-        # leans in the crossflow's direction -- real, measured drift, not
-        # something to fake away (verified: fan off, the real flame rises
-        # straight over the candle and the two already fuse; fan on, it
-        # leans and the small glow no longer reached far enough sideways
-        # to still overlap it). A wider glow keeps "the candle is where
-        # this fire comes from" true across that real range of lean
-        # instead of only in the still-air case.
+        lean = self._flame_lean_for(cx, base_z)
         glow_r = _FLAME_HEIGHT_M * 1.6
-        glow = Circle((cx, base_z + _FLAME_HEIGHT_M * 0.5), glow_r,
+        glow = Circle((cx + lean * 0.5, base_z + _FLAME_HEIGHT_M * 0.5), glow_r,
                       facecolor="#FF7A18", edgecolor="none", alpha=0.22, zorder=8)
         self.view.ax.add_patch(glow)
         patches.append(glow)
@@ -417,12 +462,12 @@ class PublicScene(QtWidgets.QWidget):
         for height_frac, color, lift_frac in _FLAME_LAYERS:
             height = _FLAME_HEIGHT_M * height_frac
             lift = _FLAME_HEIGHT_M * lift_frac
-            layer = Polygon(_flame_vertices(cx, base_z + lift, height),
+            layer = Polygon(_flame_vertices(cx, base_z + lift, height, lean=lean),
                             closed=True, facecolor=color, edgecolor="none", zorder=10)
             self.view.ax.add_patch(layer)
             patches.append(layer)
             self.view.add_animated_extra(layer)
-            self._flame_layers_anim.append((layer, cx, base_z + lift, height))
+            self._flame_layers_anim.append((layer, cx, base_z + lift, height, lean))
         return patches
 
     def _jitter_flame(self, index: int) -> None:
@@ -449,8 +494,8 @@ class PublicScene(QtWidgets.QWidget):
             self._flame_pulse_frames_left -= 1
         wobble = (1.0 + boost + 0.07 * math.sin(index * 0.7)
                   + 0.04 * math.sin(index * 1.9 + 1.3))
-        for patch, cx, base_z, base_height in self._flame_layers_anim:
-            patch.set_xy(_flame_vertices(cx, base_z, base_height * wobble))
+        for patch, cx, base_z, base_height, lean in self._flame_layers_anim:
+            patch.set_xy(_flame_vertices(cx, base_z, base_height * wobble, lean=lean))
         glow_wobble = 1.0 + boost + 0.05 * math.sin(index * 1.1 + 2.0)
         for patch, base_r in self._flame_glows:
             patch.set_radius(base_r * glow_wobble)
