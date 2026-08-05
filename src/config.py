@@ -24,7 +24,16 @@ FRAMES_PER_SECOND = 4
 # show up to 4 distinct (case, key) combos at once -- plus a small buffer so
 # switching the active cell's scenario/quantity doesn't immediately evict a
 # still-visible grid cell (was 4, single-view-only, pre-M2.2).
-SCENARIO_CACHE_SIZE = 6
+#
+# Also shared with public mode's own ScenarioStore instance (same object,
+# per data_provider.load_simulation_data): its Fan/Candle explore controls
+# span 2x2=4 scenarios, each needing *two* cache slots (TEMPERATURE +
+# VELOCITY, loaded separately -- see PublicScene.load_case), i.e. 8 slots
+# to stay fully warm -- plus the guided experiment's own choices. 6 was too
+# small to hold that without evicting an early-visited combination before
+# _prewarm_stories() even finished warming it, which was the real cause of
+# a "slow" first Fan-toggle switch (see PublicExperience._prewarm_stories).
+SCENARIO_CACHE_SIZE = 12
 
 # Per-quantity display defaults and hazard bands (M2.1/M2.6) now live in
 # the structured quantity registry (registry.py, M0.2) -- the single

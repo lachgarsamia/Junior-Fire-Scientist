@@ -13,7 +13,33 @@ direction prior (up, blended with "away from the hot core" via -grad T).
 Honest caveat: the stored VELOCITY slice is speed magnitude only (no
 u/w components) -- true directional advection would need M-SIM to add
 U-VELOCITY/W-VELOCITY slices to fds/template.fds (flagged as a wishlist
-item for that milestone, not a blocker here).
+item for that milestone, not a blocker here). Measured consequence: the
+velocity term moves the rendered smoke horizontally by <0.4 of 101
+columns versus buoyancy alone, and identically with the fan on or off,
+so it reads as spreading rather than as a direction (see
+tests/test_public_mode.py::TestSmokeMotionIsAtmosphericNotDirectional).
+
+Why not the real SOOT DENSITY (Tier 3), even though it is on disk
+-----------------------------------------------------------------
+The `.s3d` volumetric soot *is* parsed, cached and available through
+ScenarioStore (SliceKey('SOOT DENSITY', 1, 0, plane_pos=0.0), ~6-9 ms
+warm). It was measured against this proxy on both fan scenarios before
+being rejected as the visual source:
+
+  * it covers only 0.6-0.8% of the y=0 plane -- a ~5-column thread
+    directly above the candle (cols 91-95, rows 30-48 of 49x101);
+  * it shows no ceiling layer at all, so it would contradict the
+    smoke-layer narration and leave a visitor nothing to look at;
+  * its fan-on/fan-off totals are unstable (an order of magnitude apart
+    mid-run, near-equal by the end), so it discriminates the experiment
+    worse than the proxy does.
+
+The same comparison *validates* this module: 94-98% of the cells where
+real soot exists are also flagged by the temperature threshold below, so
+the proxy is a superset that agrees with the measurement everywhere the
+measurement exists. tests/test_public_mode.py::TestSootVersusTemperatureProxy
+re-checks those numbers, and fails if a future re-run makes the real
+soot field dense enough to reconsider.
 """
 
 from __future__ import annotations

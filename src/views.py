@@ -21,7 +21,7 @@ from theme import RADIUS
 from cinema.pipeline import EffectsPipeline
 from cinema.interp import lerp_frames
 from cinema.particles import EmberParticles
-from cinema.velocity_arrows import sample_points, compute_deltas
+from cinema.velocity_arrows import sample_points, compute_deltas, compute_activity
 
 # Sub-frame interpolation (FireLab roadmap Phase 2.1d): visual refresh
 # rate while cinematic mode is on, decoupled from the data's native
@@ -140,6 +140,13 @@ class SliceView:
         self.velocity_quiver = None
         self._arrow_rows = None
         self._arrow_cols = None
+        # How cinematic mode depicts the flow field. "arrows" is the
+        # original heuristic-direction quiver (unchanged for the research
+        # views); "activity" draws direction-free glyphs sized by the
+        # measured speed only -- see set_flow_mode().
+        self._flow_mode = "arrows"
+        self.flow_scatter = None
+        self._flow_phase = 0.0
         # Virtual device markers (V6-M2): same blit-tracked-artist treatment
         # as embers/arrows -- a fixed-position, per-frame-recolored scatter,
         # never recreated. No color-mapping (literal facecolors only), so
@@ -160,6 +167,12 @@ class SliceView:
         # panel (e.g. the Context Panel) hovers a device/probe row. Never
         # touches selection_bus -- a pure visual highlight, not a selection.
         self.hover_highlight = None
+        # Extra artists a caller wants redrawn on the same cheap blit path
+        # as the artists above (see _animated_artists/add_animated_extra)
+        # -- e.g. the public Fire Explorer's flame-flicker patches. Empty
+        # for every existing caller (the researcher app never calls
+        # add_animated_extra), so this is purely additive.
+        self._extra_animated: list = []
         # Room overlay (Live polish): the enclosed room's physical boundary
         # (schematic.py's room_overlay_geometry/ROOM_X/ROOM_Z, the same
         # single source of truth the sidebar diagram already draws door/
@@ -205,6 +218,10 @@ class SliceView:
         # construction for the same scalar-mappable reason as ember_scatter.
         self.device_scatter = self.ax.scatter([], [], s=70, marker="D", zorder=7,
                                               edgecolors="#14171F", linewidths=1.0)
+        # Direction-free flow glyphs (set_flow_mode("activity")): always
+        # present, empty unless that mode is on. No c=... at construction,
+        # same scalar-mappable reason as the scatters above.
+        self.flow_scatter = self.ax.scatter([], [], s=[], marker="o", zorder=6)
         # True velocity streamlines (V6-M3): empty until a panel supplies
         # segments; the quiver itself is created lazily on first real data
         # (see set_vector_field) since its arrow positions are fixed for a
@@ -294,13 +311,26 @@ class SliceView:
 
     def _animated_artists(self) -> list:
         artists = [self.heatmap, self.ember_scatter, self.device_scatter,
-                  self.streamline_collection, self.hover_highlight,
+                  self.flow_scatter, self.streamline_collection, self.hover_highlight,
                   self.room_walls, self.room_door, self.room_vents]
         if self.velocity_quiver is not None:
             artists.append(self.velocity_quiver)
         if self.true_vector_quiver is not None:
             artists.append(self.true_vector_quiver)
+        artists.extend(self._extra_animated)
         return artists
+
+    def add_animated_extra(self, artist) -> None:
+        """Register an externally-owned artist (already added to self.ax)
+        for the same cheap blit_update() path everything above uses,
+        instead of the caller needing its own capture_background() per
+        update -- see PublicScene's flame-flicker patches."""
+        if artist not in self._extra_animated:
+            self._extra_animated.append(artist)
+
+    def remove_animated_extra(self, artist) -> None:
+        if artist in self._extra_animated:
+            self._extra_animated.remove(artist)
 
     def set_room_outline(self, geometry) -> None:
         """`geometry` is schematic.room_overlay_geometry()'s return dict
@@ -522,10 +552,59 @@ class SliceView:
         self.ember_scatter.set_sizes(sizes)
         self.ember_scatter.set_facecolor(colors)
 
+    def set_flow_mode(self, mode: str) -> None:
+        """"arrows" (default) or "activity".
+
+        The arrow quiver infers direction from a temperature gradient
+        because the signed U/W components are gated -- fine as a
+        deliberately cinematic effect in the research views, which
+        document it as such. "activity" instead draws direction-free
+        glyphs whose size tracks the measured speed, for any surface
+        where a viewer could mistake an inferred arrow for measured
+        airflow direction.
+        """
+        if mode not in ("arrows", "activity"):
+            raise ValueError(f"unknown flow mode: {mode!r}")
+        self._flow_mode = mode
+        if mode == "activity" and self.velocity_quiver is not None:
+            self.velocity_quiver.remove()
+            self.velocity_quiver = None
+        if mode == "arrows" and self.flow_scatter is not None:
+            self.flow_scatter.set_offsets(np.empty((0, 2)))
+            self.flow_scatter.set_sizes([])
+
+    @property
+    def flow_mode(self) -> str:
+        return self._flow_mode
+
+    def _update_flow_activity(self, temperature_frame: np.ndarray, velocity_frame) -> None:
+        """Direction-free glyphs sized by the measured local speed."""
+        if self.flow_scatter is None:
+            return
+        if velocity_frame is None:
+            self.flow_scatter.set_offsets(np.empty((0, 2)))
+            self.flow_scatter.set_sizes([])
+            return
+        if self._arrow_rows is None:
+            self._arrow_rows, self._arrow_cols = sample_points(temperature_frame.shape)
+        self._flow_phase += 0.22
+        sizes, alphas = compute_activity(velocity_frame, self._arrow_rows,
+                                         self._arrow_cols, phase=self._flow_phase)
+        xs, ys = self._index_to_display_xy(self._arrow_rows, self._arrow_cols)
+        self.flow_scatter.set_offsets(np.column_stack([xs, ys]))
+        self.flow_scatter.set_sizes(sizes)
+        colors = np.zeros((len(alphas), 4))
+        colors[:, 0], colors[:, 1], colors[:, 2] = 0.81, 0.91, 1.0   # #CFE8FF
+        colors[:, 3] = alphas
+        self.flow_scatter.set_facecolor(colors)
+
     def _update_velocity_arrows(self, temperature_frame: np.ndarray, velocity_frame) -> None:
         """Sparse directional flow arrows (heuristic direction -- see
         cinema/velocity_arrows.py's own docstring for why: the stored
         VELOCITY slice is speed magnitude only, no true vector)."""
+        if self._flow_mode == "activity":
+            self._update_flow_activity(temperature_frame, velocity_frame)
+            return
         if velocity_frame is None:
             if self.velocity_quiver is not None:
                 zeros = np.zeros(len(self._arrow_rows))

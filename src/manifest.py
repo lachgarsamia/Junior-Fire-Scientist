@@ -186,6 +186,22 @@ def get_manifest(sim_root: str, manifest_path: str = None, force_regenerate: boo
     return entries
 
 
+def foreign_path_entries(entries: list, sim_root: str) -> list:
+    """Entries whose `path` points outside `sim_root` -- i.e. this study's
+    manifest is serving data from some *other* checkout.
+
+    The manifest stores absolute paths (see ScenarioEntry.path), so a
+    directory that was copied rather than re-scanned keeps pointing at the
+    original. That silently works as long as the original still exists,
+    which makes it the worst kind of failure: an exhibition machine loads
+    fine on the bench and falls back to demo data once the sibling
+    directory moves. Public mode calls this at startup (see
+    public/experience.py) rather than trusting a manifest it did not write.
+    """
+    root = os.path.abspath(sim_root)
+    return [e for e in entries if os.path.commonpath([root, os.path.abspath(e.path)]) != root]
+
+
 def factor_counts(entries: list) -> tuple:
     """(n_candles, n_door, n_vod, n_voc) actually present across entries."""
     return tuple(max((e.factor_index(f) for e in entries), default=-1) + 1 for f in _FACTORS)
