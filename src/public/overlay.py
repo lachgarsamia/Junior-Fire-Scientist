@@ -18,8 +18,9 @@ from public import i18n
 from public import kid_language as kid
 from public.celebration import CelebrationOverlay
 from public.mascot import Mascot, SpeechBubble, IDLE, POINTING, SURPRISED, THINKING
-from public.widgets import (ACCENT, DELIGHT, PANEL_BORDER, TEXT, TEXT_DIM, BigButton, Card,
-                            ExploreToggle, MeterChip, StageStrip, Thermometer, TitleBanner)
+from public.widgets import (ACCENT, AIRFLOW, DELIGHT, INERT, PANEL_BORDER, TEXT, TEXT_DIM,
+                            BigButton, Card, ExploreToggle, MeterChip, StageStrip, Thermometer,
+                            TitleBanner)
 
 
 class PublicOverlay(QtWidgets.QWidget):
@@ -404,7 +405,7 @@ class PublicOverlay(QtWidgets.QWidget):
         self._fan_marker_frac = frac
         self.fan_marker.setText("🌬️  FAN ON" if on else "🚫  FAN OFF")
         self.fan_marker.setStyleSheet(
-            f"background: {ACCENT if on else 'rgba(24, 30, 42, 220)'}; "
+            f"background: {AIRFLOW if on else 'rgba(24, 30, 42, 220)'}; "
             f"color: {'#1A1005' if on else TEXT_DIM}; font-size: 13px; font-weight: 700;"
             "border-radius: 10px; padding: 4px 10px;")
         self.fan_marker.adjustSize()
@@ -528,7 +529,12 @@ class PublicOverlay(QtWidgets.QWidget):
         self._explore_toggles = {}
         self._explore_insert_index = 0
         for control in controls:
-            toggle = ExploreToggle(control.label, control.icon, control.options)
+            # The fan is the one control where "on" has its own meaning
+            # worth a color (air moving) distinct from generic "selected"
+            # -- every other control keeps ExploreToggle's ACCENT default.
+            checked_colors = [INERT, AIRFLOW] if control.key == "fan" else None
+            toggle = ExploreToggle(control.label, control.icon, control.options,
+                                    checked_colors=checked_colors)
             toggle.value_changed.connect(
                 lambda value, key=control.key: self.explore_changed.emit(key, value))
             self._explore_layout.insertWidget(self._explore_insert_index, toggle)

@@ -44,6 +44,15 @@ TEXT_DIM = "#A9B4C4"
 # not just informational" UI element (the Games entry) can reuse it on
 # purpose instead of picking a new color out of the air.
 DELIGHT = "#FFD166"
+# Same cyan as scene.py's vent-activity glow (the patch that appears over
+# the vent while vod == 2) -- reused here, not picked fresh, so the fan's
+# ON state reads as "air is moving" instead of borrowing ACCENT's
+# fire-orange, which already means flame/candles elsewhere on screen.
+AIRFLOW = "#7DD3FC"
+# Neutral, hue-less "off/inert" checked state -- paired with AIRFLOW on
+# the fan toggle so OFF never reads as a dimmer version of some other
+# meaning (it isn't cooling, isn't flame-adjacent, it's just off).
+INERT = "#6B7280"
 
 
 class BigButton(QtWidgets.QPushButton):
@@ -112,7 +121,13 @@ class ExploreToggle(QtWidgets.QWidget):
 
     value_changed = QtCore.pyqtSignal(object)
 
-    def __init__(self, label: str, icon: str, options, parent=None):
+    def __init__(self, label: str, icon: str, options, parent=None, checked_colors=None):
+        """`checked_colors`, when given, is one color per option (same
+        order as `options`) for that option's own checked state -- e.g.
+        the fan toggle uses [INERT, AIRFLOW] so OFF and ON read as two
+        different things rather than one generic "selected" hue. Falls
+        back to ACCENT for every option, the original one-hue-fits-all
+        treatment every other control still uses."""
         super().__init__(parent)
         self._flash_timer = None
         layout = QtWidgets.QVBoxLayout(self)
@@ -131,6 +146,8 @@ class ExploreToggle(QtWidgets.QWidget):
         self._group.setExclusive(True)
         self._values = []
         for index, option in enumerate(options):
+            color = checked_colors[index] if checked_colors else ACCENT
+            hover_color = QtGui.QColor(color).lighter(115).name()
             button = QtWidgets.QPushButton(f"{option.icon} {option.label}")
             button.setCheckable(True)
             button.setCursor(QtCore.Qt.PointingHandCursor)
@@ -143,10 +160,10 @@ class ExploreToggle(QtWidgets.QWidget):
                     font-size: 16px; font-weight: 600; padding: 6px 12px;
                 }}
                 QPushButton:checked {{
-                    background: {ACCENT}; color: #1A1005; border: 2px solid transparent;
+                    background: {color}; color: #1A1005; border: 2px solid transparent;
                 }}
                 QPushButton:hover {{ background: rgba(44, 54, 72, 245); }}
-                QPushButton:checked:hover {{ background: #FF9440; }}
+                QPushButton:checked:hover {{ background: {hover_color}; }}
                 QPushButton:focus {{ border: 3px solid #FFD166; }}
             """)
             self._group.addButton(button, index)
