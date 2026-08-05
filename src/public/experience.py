@@ -730,8 +730,12 @@ class PublicExperience(QtWidgets.QWidget):
         # 800x600, and a wrapped line pushes the last item out of view.
         index = self.state.frame_index
         smoke_beat = self._story.ceiling_beat() if self._story is not None else None
-        smoke_now = (smoke_beat is not None
-                     and smoke_beat.frame_index in self._spoken_beats)
+        # Checked against the current frame, not _spoken_beats: this card
+        # only opens on an explicit tap (a pull, never pushed at the
+        # child -- see _narrate's own docstring), so it must describe
+        # what is truly on screen right now even in OBSERVE, where the
+        # beat's own mascot narration deliberately never fires.
+        smoke_now = (smoke_beat is not None and index >= smoke_beat.frame_index)
         has_velocity = self.scene._velocity is not None
         airflow_now = (has_velocity
                        and kid.airflow_band_key(self.scene.mean_airspeed_at(index))
@@ -816,13 +820,17 @@ class PublicExperience(QtWidgets.QWidget):
     def _nudge_before_beat(self, index: int) -> None:
         """One "look closely" a moment before the smoke beat lands.
 
+        EXPERIMENT-only: the guided run is a deliberately entered
+        activity the child is actively watching, so a heads-up before the
+        beat lands is a fair courtesy there. Free exploration (OBSERVE)
+        must stay calm and un-narrated -- see _narrate below.
+
         Timed off the detected beat rather than a fixed frame, so it
         builds anticipation for something that is genuinely about to
         happen -- and never fires at all in a run where the beat does
-        not exist. Without it the observation was dead air followed by a
-        shout.
+        not exist.
         """
-        if self._nudged or self.state.phase is not Phase.OBSERVE:
+        if self._nudged or self.state.phase is not Phase.EXPERIMENT:
             return
         beat = self._story.ceiling_beat() if self._story is not None else None
         if beat is None or beat.frame_index in self._spoken_beats:
@@ -835,27 +843,28 @@ class PublicExperience(QtWidgets.QWidget):
     def _narrate(self, index: int) -> None:
         """Speak the story beat for this frame, at most once per run.
 
+        EXPERIMENT-only. Free exploration (OBSERVE) is meant to hold one
+        sentence in a child's head -- "I am exploring a fire experiment"
+        -- with nothing arriving unprompted; a beat firing mid-loop,
+        independent of anything the child had just done, competed with
+        that (see docs/HANDOFF-PUBLIC-MODE-REDESIGN.md §3/§4). The
+        guided experiment is different: the child chose to run it, is
+        actively watching one specific scenario, and the beat is real
+        commentary on what they are watching, not ambient noise.
+
         Beats are tracked by frame index in `_spoken_beats` rather than by
-        comparing bubble text: looping the attract fire, or seeking
-        backwards, would otherwise re-trigger a beat every time it came
-        round again. Once spoken, a message is left on screen until the
-        next beat replaces it -- clearing it after its window would blank
-        the bubble mid-sentence for a slow reader.
+        comparing bubble text: seeking backwards would otherwise
+        re-trigger a beat every time it came round again. Once spoken, a
+        message is left on screen until the next beat replaces it --
+        clearing it after its window would blank the bubble mid-sentence
+        for a slow reader.
         """
-        if self._story is None or self.state.phase not in (Phase.OBSERVE, Phase.EXPERIMENT):
+        if self._story is None or self.state.phase is not Phase.EXPERIMENT:
             return
         beat = self._story.beat_at(index, window=BEAT_VISIBLE_FRAMES)
         if beat is None or beat.frame_index in self._spoken_beats:
             return
         self._spoken_beats.add(beat.frame_index)
-        # Banner first, then the guide's reaction to it -- the finding is
-        # the statement, the mascot is the response. Saying the same
-        # sentence in both places wasted the mascot and filled two thirds
-        # of the screen with one message.
-        #
-        # The flash is limited to observing: during the experiment the
-        # banner belongs to the change the visitor's own choice caused,
-        # and a re-fired ignition beat would stomp it a frame later.
         beat_line = f"{beat.icon}  {tr(beat.text)}"
         self.overlay.say(tr(beat.reaction) if beat.reaction else beat_line, beat.mood)
 

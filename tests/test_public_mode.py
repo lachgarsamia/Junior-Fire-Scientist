@@ -301,7 +301,15 @@ class TestObserveTiming:
         finally:
             window.close()
 
-    def test_smoke_beat_is_narrated_exactly_once_and_resets_on_replay(self, qapp):
+    def test_observe_never_narrates_the_smoke_beat(self, qapp):
+        """Free exploration must stay calm: the beat detector still runs
+        (see TestObserveTiming's timing tests above and TestCeilingBeat
+        elsewhere), but nothing may speak it unprompted while a visitor
+        is just watching/looping OBSERVE on their own -- see
+        docs/HANDOFF-PUBLIC-MODE-REDESIGN.md §3/§4. Narration now only
+        fires during the guided EXPERIMENT run the child chose to start
+        (see test_experiment_narrates_the_smoke_beat_exactly_once below).
+        """
         sim = load_simulation_data()
         if sim.is_demo:
             pytest.skip("real dataset not present")
@@ -317,31 +325,58 @@ class TestObserveTiming:
                 original_say(text, mood)
             experience.overlay.say = record
 
-            def drive_observe():
-                """Step through the observation deterministically. The
-                phase is already OBSERVE by the time this is called --
-                _start_observe() on the first pass, _on_replay() on the
-                second -- so it only drives the clock."""
+            experience._begin_journey()
+            experience._start_observe()
+            experience.time_controller.pause()
+            beat = experience._story.ceiling_beat()
+            assert beat is not None
+            for frame in range(beat.frame_index + experience_mod.BEAT_VISIBLE_FRAMES + 1):
+                experience.time_controller.seek(frame)
+            assert not any("gathering under the ceiling" in t for t in spoken)
+            assert not any("Look closely" in t for t in spoken)
+        finally:
+            window.close()
+
+    def test_experiment_narrates_the_smoke_beat_exactly_once(self, qapp):
+        sim = load_simulation_data()
+        if sim.is_demo:
+            pytest.skip("real dataset not present")
+        window = MainWindow(sim)
+        try:
+            window.enter_public_mode()
+            experience = window.public_experience
+            spoken = []
+            original_say = experience.overlay.say
+
+            def record(text, mood=None):
+                spoken.append(text)
+                original_say(text, mood)
+            experience.overlay.say = record
+
+            def drive_experiment():
+                """Step through the run deterministically."""
                 experience.time_controller.pause()
-                for frame in range(experience._observe_end_frame() + 1):
+                for frame in range(experience_mod.EXPERIMENT_END_FRAME + 1):
                     experience.time_controller.seek(frame)
 
             experience._begin_journey()
-            experience._start_observe()
-            drive_observe()
-            # The mascot speaks the finding directly now -- no banner
-            # flash, no separate reaction line (see _narrate). Assert on
-            # the stable substring, not the full "icon + text" string, so
-            # this isn't brittle to icon changes.
+            experience._on_prediction("cooler")
+            run_countdown(experience)
+            assert experience.state.phase is Phase.EXPERIMENT
+            drive_experiment()
+            # Assert on the stable substring, not the full "icon + text"
+            # string, so this isn't brittle to icon changes.
             smoke = [t for t in spoken if "gathering under the ceiling" in t]
             assert len(smoke) == 1
 
-            # Replay lands back in OBSERVE on its own and must let the
-            # beat play for the next visitor.
+            # Replay must let the beat play again for the next visitor.
             spoken.clear()
             experience._on_replay()
-            assert experience.state.phase is Phase.OBSERVE
-            drive_observe()
+            experience._begin_journey()
+            experience._on_prediction("cooler")
+            run_countdown(experience)
+            assert experience.state.phase is Phase.EXPERIMENT
+            drive_experiment()
             assert len([t for t in spoken
                         if "gathering under the ceiling" in t]) == 1
         finally:
@@ -2185,19 +2220,26 @@ class TestExhibitMoments:
                         experience.overlay.card.findChildren(QtWidgets.QLabel))
         assert "FDS" in text and "candle" in text.lower()
 
-    # -- observe said the same sentence twice --------------------------
+    # -- experiment said the same sentence twice ------------------------
     def test_ceiling_beat_reaches_the_guide_not_the_banner(self, experience):
         """Regression sibling to TestObserveTiming's narration test --
         missed when that one was updated for the mascot-whisper redesign
-        (see _narrate: OBSERVE no longer flashes the banner for this
-        beat, the finding goes straight to the guide's speech bubble
-        instead). Same original intent as this test's old name --
-        the guide surfaces the finding, it never duplicates it into a
-        second on-screen announcement -- just guarding the opposite
-        direction now: the beat must not hijack the banner again."""
+        (see _narrate: the beat never flashes the banner, the finding
+        goes straight to the guide's speech bubble instead). Same
+        original intent as this test's old name -- the guide surfaces the
+        finding, it never duplicates it into a second on-screen
+        announcement -- just guarding the opposite direction now: the
+        beat must not hijack the banner again.
+
+        Driven through the guided EXPERIMENT run, not OBSERVE: narration
+        is EXPERIMENT-only now (see docs/HANDOFF-PUBLIC-MODE-REDESIGN.md
+        §3/§4 and TestObserveTiming.test_observe_never_narrates_the_smoke_beat)."""
         experience._begin_journey()
-        experience._start_observe()
+        experience._on_prediction("cooler")
+        run_countdown(experience)
+        assert experience.state.phase is Phase.EXPERIMENT
         experience.time_controller.pause()
+        prompt_before = experience.overlay.banner.text()
         beat = experience._story.ceiling_beat()
         for frame in range(beat.frame_index + 1):
             experience.time_controller.seek(frame)
@@ -2205,7 +2247,7 @@ class TestExhibitMoments:
         bubble = experience.overlay.bubble.text()
         assert "gathering under the ceiling" in bubble
         assert "gathering under the ceiling" not in banner
-        assert banner == experience.experiment.observe_prompt
+        assert banner == prompt_before
 
     def test_every_beat_has_its_own_reaction(self, sim_data):
         """Every beat has a distinguishing mascot reaction except the
@@ -2223,9 +2265,13 @@ class TestExhibitMoments:
             assert beat.reaction != beat.text
 
     def test_observation_builds_anticipation_before_the_beat(self, experience):
-        """The observation used to be dead air followed by a shout."""
+        """The experiment run used to be dead air followed by a shout.
+        Driven through EXPERIMENT -- see the class docstring change on
+        test_ceiling_beat_reaches_the_guide_not_the_banner above."""
         experience._begin_journey()
-        experience._start_observe()
+        experience._on_prediction("cooler")
+        run_countdown(experience)
+        assert experience.state.phase is Phase.EXPERIMENT
         experience.time_controller.pause()
         beat = experience._story.ceiling_beat()
         said = []
@@ -2241,7 +2287,9 @@ class TestExhibitMoments:
 
     def test_nudge_fires_once_and_resets_on_replay(self, experience):
         experience._begin_journey()
-        experience._start_observe()
+        experience._on_prediction("cooler")
+        run_countdown(experience)
+        assert experience.state.phase is Phase.EXPERIMENT
         experience.time_controller.pause()
         beat = experience._story.ceiling_beat()
         said = []
@@ -2254,7 +2302,7 @@ class TestExhibitMoments:
         assert not experience._nudged
 
     def test_no_nudge_when_there_is_no_beat_to_anticipate(self, experience):
-        experience.state.go_to(Phase.OBSERVE)
+        experience.state.go_to(Phase.EXPERIMENT)
         experience._story = StoryController(
             np.full((200, 20, 30), 20.0, dtype=np.float32), (0.0, 1.0, 0.0, 0.48), 4)
         experience._nudged = False
