@@ -70,6 +70,29 @@ _FLAME_LAYERS = (   # (height fraction, colour, lift fraction) outer -> core
 # "the whole left half of the room".
 _CANDLE_TAP_RADIUS_M = 0.05
 
+# Fan housing + blades (Design Review §6 Priority 1: the fan should read
+# as a physical object at rest, not an effect that only exists while
+# active). Sized against the same 1.0 x 0.48 m domain the candle/flame
+# constants above are scaled to.
+#
+# Blades are thin spoke *lines*, not filled wedges: this view's axes use
+# aspect="auto" (views.py's imshow_kwargs) so a data-space shape is
+# stretched by whatever the widget's own pixel aspect happens to be.
+# Solid kite-shaped blades survived that fine individually but merged
+# into one dart/star silhouette once stretched -- caught in a live
+# 800x600 screenshot, not a hypothetical. Four thin spokes in a "+"
+# read as a fan under any stretch; three solid wedges did not.
+_FAN_HOUSING_RADIUS_M = 0.032
+_FAN_BLADE_LENGTH_M = 0.026
+_FAN_N_BLADES = 4
+# Purely decorative, like _jitter_flame's own flicker (see its
+# docstring) -- FDS does not simulate blade RPM, so the spin is a
+# symbolic "this is on" state, not a claimed measurement, the same way
+# the flame's wobble is not read off the HRR curve. Real per-frame
+# velocity already drives the separate activity glow (_jitter_vent_
+# activity), which *is* tied to a measured quantity.
+_FAN_SPIN_RADIANS_PER_FRAME = 0.5
+
 
 def _flame_vertices(cx: float, base_z: float, height: float, width_ratio: float = 0.42) -> list:
     """A rounded teardrop outline, `height` above (cx, base_z) -- the data-
@@ -84,6 +107,14 @@ def _flame_vertices(cx: float, base_z: float, height: float, width_ratio: float 
         (cx - w, base_z + height * 0.12),
         (cx - w * 0.55, base_z + height * 0.55),
     ]
+
+
+def _fan_blade_endpoints(cx: float, cz: float, angle: float, length: float) -> tuple:
+    """(xs, ys) for a single spoke from the hub (cx, cz) outward at
+    `angle` radians -- feeds a Line2D's set_data the same way
+    _flame_vertices feeds a Polygon's set_xy."""
+    dx, dz = math.cos(angle), math.sin(angle)
+    return ([cx, cx + dx * length], [cz, cz + dz * length])
 
 
 class PublicScene(QtWidgets.QWidget):
@@ -143,6 +174,18 @@ class PublicScene(QtWidgets.QWidget):
         # nothing beyond the redraw show_frame() was already doing.
         self._vent_activity_patch = None
         self._vent_activity_base_r = 0.0
+        # The fan itself: a housing (static, baked into the background
+        # like the candle body/wick) plus blades (animated like the flame
+        # layers) -- present at the vent position in every scenario that
+        # has one, regardless of on/off, so it reads as a physical object
+        # at rest rather than an effect that only exists while active
+        # (Design Review §6 Priority 1). _fan_signature is the vent
+        # position last drawn at, the same redundant-redraw guard
+        # _candle_signature gives _draw_candles.
+        self._fan_housing_patch = None
+        self._fan_blades: list = []
+        self._fan_blade_angle = 0.0
+        self._fan_signature: Optional[tuple] = None
         # Hot/Cold's two simultaneous markers -- separate scatter artists
         # from SliceView.hover_highlight (which the researcher app's
         # Context Panel hover also uses), so this never touches shared
@@ -211,6 +254,7 @@ class PublicScene(QtWidgets.QWidget):
             self.view.set_flow_mode("activity")
         self.view.set_room_outline(self._room_outline_for(case_index))
         self._draw_candles(case_index)
+        self._draw_fan(case_index)
         self._update_vent_activity(case_index)
         self.clear_probe()
         return int(self._temperature.shape[0])
@@ -344,6 +388,55 @@ class PublicScene(QtWidgets.QWidget):
     # deliberate "I felt that" flash rather than a lingering effect.
     _FLAME_PULSE_FRAMES = 8
 
+    def _draw_fan(self, case_index: int) -> None:
+        """A small housing + blades at the real vent position, drawn
+        whenever a scenario has one to draw at all -- unlike the activity
+        glow below, this does not depend on on/off state (Design Review
+        §6 Priority 1): a fan that only exists in the ON scenes reads as
+        an effect, not an object. The housing is static (baked into the
+        background like the candle body/wick); the blades sit in
+        SliceView's animated set so _jitter_vent_activity can turn them.
+
+        Same redundant-redraw guard _draw_candles uses (a signature
+        check before touching any existing patch): the vent position is
+        the same across every scenario on this plane, so in practice this
+        only ever does real work once, on the first load.
+        """
+        position = self.vent_marker_position(case_index)
+        if position == self._fan_signature:
+            return
+        self._fan_signature = position
+        if self._fan_housing_patch is not None:
+            self._fan_housing_patch.remove()
+            self._fan_housing_patch = None
+        for blade in self._fan_blades:
+            self.view.remove_animated_extra(blade)
+            blade.remove()
+        self._fan_blades = []
+        if position is None:
+            self.view.canvas.capture_background()
+            return
+        vx, vz = position
+        # A ring, not a filled disc -- a solid housing sat on top of the
+        # blades' own colour and read as a heavy button rather than a
+        # fan's outer frame (same live-screenshot check as the blade
+        # shape above).
+        housing = Circle((vx, vz), _FAN_HOUSING_RADIUS_M,
+                         facecolor="#232B38", edgecolor="#8B96A8",
+                         linewidth=1.4, alpha=0.85, zorder=7)
+        self.view.ax.add_patch(housing)
+        self._fan_housing_patch = housing
+        self._fan_blade_angle = 0.0
+        for k in range(_FAN_N_BLADES):
+            angle = k * (2 * math.pi / _FAN_N_BLADES)
+            xs, ys = _fan_blade_endpoints(vx, vz, angle, _FAN_BLADE_LENGTH_M)
+            blade = Line2D(xs, ys, color="#C3CCD9", linewidth=2.4,
+                           solid_capstyle="round", zorder=9)
+            self.view.ax.add_line(blade)
+            self.view.add_animated_extra(blade)
+            self._fan_blades.append(blade)
+        self.view.canvas.capture_background()
+
     def _update_vent_activity(self, case_index: int) -> None:
         """A small activity glow at the vent's real position -- present
         only while the fan is actually ON (entry.vod == 2), matching
@@ -379,6 +472,7 @@ class PublicScene(QtWidgets.QWidget):
         tick _jitter_flame already rides for free -- no independent
         timer, and the patch simply doesn't exist while the fan is OFF,
         so there is nothing to update (and nothing drawn) then."""
+        self._spin_fan_blades()
         if self._vent_activity_patch is None:
             return
         speed = float(vel.mean()) if vel is not None else 0.0
@@ -389,6 +483,21 @@ class PublicScene(QtWidgets.QWidget):
         self._vent_activity_patch.set_alpha(0.12 + 0.28 * intensity)
 
     _VELOCITY_ACTIVITY_SCALE = 0.5
+
+    def _spin_fan_blades(self) -> None:
+        """Turn the blades while the fan is ON, hold them still while
+        OFF -- the same "does the activity patch exist" proxy for on/off
+        _jitter_vent_activity's own docstring already relies on, so this
+        never needs its own copy of the entry.vod check."""
+        if not self._fan_blades or self._fan_signature is None:
+            return
+        if self._vent_activity_patch is not None:
+            self._fan_blade_angle += _FAN_SPIN_RADIANS_PER_FRAME
+        vx, vz = self._fan_signature
+        for k, blade in enumerate(self._fan_blades):
+            angle = self._fan_blade_angle + k * (2 * math.pi / _FAN_N_BLADES)
+            xs, ys = _fan_blade_endpoints(vx, vz, angle, _FAN_BLADE_LENGTH_M)
+            blade.set_data(xs, ys)
 
     def pulse_flame(self) -> None:
         """Trigger a brief extra-amplitude flicker -- the candle's own
