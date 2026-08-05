@@ -29,11 +29,27 @@ from registry import get_quantity
 from schematic import room_overlay_geometry, _CANDLE_X, ROOM_X, ROOM_Z
 from slice_key import SliceKey, DEFAULT_SLICE_KEY
 from summary_stats import _read_hrr_csv
-from views import SliceView
+from views import SliceView, CINEMA_BG
 
 logger = logging.getLogger(__name__)
 
 VELOCITY_KEY = SliceKey("VELOCITY", 1, 0)
+
+# The scene renders into the left SCENE_WIDTH_FRAC of this widget, not
+# the full width -- the remaining right-hand strip is real, reserved
+# space the axes never draws into at all, for the thermometer to dock
+# in without ever overlapping scene content (the room's right wall,
+# where the second vent lives, is the domain's own right edge -- i.e.
+# the *previous* full-bleed axes' right edge too, leaving no genuine
+# gap there for anything to dock into; several rounds of shrinking the
+# vent glyph and nudging the thermometer's anchor offset never fixed
+# that, because there was no slack to nudge into). _strip_chrome uses
+# this to position the axes; widget_fraction_for and probe_at both use
+# it too, to keep data<->pixel conversion consistent with wherever the
+# axes actually is on screen -- getting these three out of sync is
+# exactly the "probe mismapping" bug this session already fixed once
+# (see _strip_chrome's own docstring).
+SCENE_WIDTH_FRAC = 0.76
 
 # Candle body drawn at the real burner location (schematic._CANDLE_X,
 # the floor). Sized small relative to the 1.0 x 0.48 m domain -- an
@@ -101,13 +117,16 @@ _FAN_SPIN_RADIANS_PER_FRAME = 0.5
 #
 # Deliberately smaller than the fan housing: this vent's real position
 # (x=0.86-0.94, near the room's far/right wall) sits right where the
-# thermometer docks (PublicScene.room_wall_anchor is that same wall) --
-# at the fan's own scale this collided with the thermometer's tick
-# labels in an 800x600 screenshot. Physical position is never adjusted
-# to dodge that (it would misrepresent the real vent location); only
-# the rendered size is reduced.
-_VENT2_FRAME_HALF_WIDTH_M = 0.016
-_VENT2_SLAT_LENGTH_M = 0.026
+# thermometer docks (PublicScene.room_wall_anchor is the same wall, at
+# the domain's own right edge -- there is no "outside the wall" margin
+# at this resolution, so the thermometer is always pinned as far right
+# as its own width allows and the two are always close). Physical
+# position is never adjusted to dodge that (it would misrepresent the
+# real vent location); only the rendered size is reduced, twice now --
+# a first pass still touched the thermometer's gold ring with no gap in
+# an 800x600 screenshot.
+_VENT2_FRAME_HALF_WIDTH_M = 0.011
+_VENT2_SLAT_LENGTH_M = 0.018
 _VENT2_N_SLATS = 3
 _VENT2_CLOSED_ANGLE = 0.0                 # flush, horizontal
 _VENT2_OPEN_ANGLE = math.pi / 5           # tilted open
@@ -637,26 +656,14 @@ class PublicScene(QtWidgets.QWidget):
         (x0, z0, x1, _z1), _state = geometry["vents"][1]
         return ((x0 + x1) / 2, z0)
 
-    def candle_marker_position(self, case_index: int) -> Optional[tuple]:
-        """Physical (x, z) at the real candle burner(s)' own group
-        midpoint -- the same anchor whether this scenario has 1 or 2
-        candles, so the marker never visually jumps when the count
-        changes (see PublicOverlay.set_candle_marker). None off the
-        y-normal plane or with no manifest entry, the same gate
-        candle_hit/_draw_candles use."""
-        entry = self._entry(case_index)
-        if entry is None or self._quantity_key.direction != 1:
-            return None
-        return (sum(_CANDLE_X) / 2, ROOM_Z[0])
-
     def room_wall_anchor(self, case_index: int) -> Optional[tuple]:
         """Physical (x, z) just outside the room's own real right-hand
         wall (ROOM_X[1]) at mid-height -- lets a Qt overlay widget (the
         thermometer) dock beside the actual room geometry instead of a
         fixed pixel offset from the window edge, the same idea
-        vent_marker_position/candle_marker_position already use for the
-        fan/candle labels. None off the y-normal plane or with no
-        manifest entry, same gate those two use."""
+        vent_marker_position already uses for the fan label. None off
+        the y-normal plane or with no manifest entry, same gate that
+        one uses."""
         entry = self._entry(case_index)
         if entry is None or self._quantity_key.direction != 1:
             return None
@@ -764,13 +771,21 @@ class PublicScene(QtWidgets.QWidget):
         (x, z) -> this widget's own (fraction_x, fraction_y_from_top),
         for placing a Qt overlay element aligned with real FDS geometry
         (e.g. a fan-state label sitting at the actual vent). None outside
-        the plotted extent."""
+        the plotted extent.
+
+        The x fraction is scaled by SCENE_WIDTH_FRAC: the axes only
+        occupies that much of the widget's width (see _strip_chrome), so
+        a data fraction of 1.0 (the room's own right wall) has to land at
+        widget fraction SCENE_WIDTH_FRAC, not 1.0, or every real-geometry
+        marker (the vent labels, this widget's own thermometer anchor)
+        would sit past the axes' actual right edge, out in the reserved
+        thermometer column."""
         if self.view._extent is None:
             return None
         x0, x1, z0, z1 = self.view._extent
         if x1 == x0 or z1 == z0:
             return None
-        return ((x - x0) / (x1 - x0), 1.0 - (z - z0) / (z1 - z0))
+        return (SCENE_WIDTH_FRAC * (x - x0) / (x1 - x0), 1.0 - (z - z0) / (z1 - z0))
 
     def _strip_chrome(self) -> None:
         """Hide every scientific affordance: colorbar, axis frame, title.
@@ -781,15 +796,28 @@ class PublicScene(QtWidgets.QWidget):
         self.view.ax.set_yticks([])
         for spine in self.view.ax.spines.values():
             spine.set_visible(False)
-        # Full bleed -- the fire should reach the edges of the screen, not
-        # sit in a plot box with margins. subplots_adjust() alone can't get
-        # there: init_plot()'s fig.colorbar(fraction=0.04, pad=0.02) already
-        # shrank this axes' position directly (colorbar's own make_axes sets
-        # it explicitly, bypassing the subplot grid subplots_adjust
+        # Full bleed vertically, SCENE_WIDTH_FRAC horizontally -- the fire
+        # should reach the top/bottom/left edges of the screen, not sit in
+        # a plot box with margins, but the right SCENE_WIDTH_FRAC..1 strip
+        # is deliberately real reserved space for the thermometer (see
+        # SCENE_WIDTH_FRAC's own comment), never drawn into.
+        # subplots_adjust() alone can't get either the old full bleed or
+        # this: init_plot()'s fig.colorbar(fraction=0.04, pad=0.02) already
+        # shrank this axes' position directly (colorbar's own make_axes
+        # sets it explicitly, bypassing the subplot grid subplots_adjust
         # recomputes from), and hiding the colorbar above never gives that
-        # width back -- it leaves a permanent blank strip on the right. Only
-        # an explicit set_position() overrides an explicitly-set position.
-        self.view.ax.set_position([0, 0, 1, 1])
+        # width back -- it leaves a permanent blank strip on the right.
+        # Only an explicit set_position() overrides an explicitly-set
+        # position.
+        self.view.ax.set_position([0, 0, SCENE_WIDTH_FRAC, 1])
+        # That reserved strip is outside the axes' own bounds, so it
+        # paints with the *figure's* background, not the axes' CINEMA_BG
+        # (set by set_cinematic_mode, called right after this) -- left at
+        # its research-view default (MplCanvas.PLOT_BG, white) it showed
+        # up as a stark white column behind the thermometer. Matched to
+        # the same near-black the axes itself uses so the reserved column
+        # reads as "part of this dark screen", not a rendering glitch.
+        self.view.canvas.fig.set_facecolor(CINEMA_BG)
         self.view.canvas.capture_background()
 
     def _load_velocity(self, case_index: int):
@@ -901,11 +929,14 @@ class PublicScene(QtWidgets.QWidget):
         matplotlib's own transform/event pipeline (which needs a real
         QMouseEvent delivered to the canvas, and the overlay sits above
         it and would have to give that up first). Instead it uses the
-        one geometric fact PublicScene itself guarantees: `_strip_chrome`
-        always sets the axes to fill the entire figure (0,0)-(1,1), so a
-        widget-fraction position maps to the known physical `extent`
-        directly -- no devicePixelRatio or transform-API version
-        assumptions involved.
+        two geometric facts PublicScene itself guarantees: `_strip_chrome`
+        always sets the axes to (0,0)-(SCENE_WIDTH_FRAC,1) of the figure,
+        so a widget-fraction position maps to the known physical `extent`
+        directly once rescaled by SCENE_WIDTH_FRAC -- no devicePixelRatio
+        or transform-API version assumptions involved. A tap past
+        SCENE_WIDTH_FRAC lands in the reserved thermometer column, not on
+        the scene, and returns None the same way a tap outside the
+        widget's own bounds already did.
         """
         if self._temperature is None or self.view._extent is None:
             return None
@@ -913,7 +944,7 @@ class PublicScene(QtWidgets.QWidget):
         width, height = canvas.width(), canvas.height()
         if width <= 0 or height <= 0:
             return None
-        frac_x = widget_pos.x() / width
+        frac_x = (widget_pos.x() / width) / SCENE_WIDTH_FRAC
         frac_y = 1.0 - (widget_pos.y() / height)   # Qt top-left -> plot bottom-left
         if not (0.0 <= frac_x <= 1.0 and 0.0 <= frac_y <= 1.0):
             return None

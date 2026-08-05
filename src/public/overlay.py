@@ -61,7 +61,6 @@ class PublicOverlay(QtWidgets.QWidget):
         self._dragging = False
         self._explore_toggles: dict = {}
         self._fan_marker_frac = None
-        self._candle_marker_frac = None
         self._thermometer_anchor_frac = None
 
         root = QtWidgets.QVBoxLayout(self)
@@ -244,17 +243,6 @@ class PublicOverlay(QtWidgets.QWidget):
         self.fan_marker.setAlignment(QtCore.Qt.AlignCenter)
         self.fan_marker.hide()
 
-        # Phase 11 section 7: the candle's own "I changed this" memory,
-        # the exact same idea as fan_marker above -- a real label at the
-        # real candle's physical x-position, sharing fan_row rather than
-        # a second reserved strip (the two never overlap: the vent and
-        # candle sit at very different x-fractions in this study's own
-        # geometry).
-        self.candle_marker = QtWidgets.QLabel("", self.fan_row)
-        self.candle_marker.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
-        self.candle_marker.setAlignment(QtCore.Qt.AlignCenter)
-        self.candle_marker.hide()
-
         # Exit affordance: small, dim, and out of the way. Deliberately
         # not labelled "Quit" -- it returns to the researcher app, and a
         # visitor should have no reason to press it.
@@ -432,65 +420,13 @@ class PublicOverlay(QtWidgets.QWidget):
         x = max(4, min(x, self.fan_row.width() - self.fan_marker.width() - 4))
         self.fan_marker.move(x, max(0, y))
 
-    # -- candle marker (Phase 11 section 7) ----------------------------------
-    def set_candle_marker(self, frac, count: int) -> None:
-        """The candle's own "I changed this" memory -- see set_fan_marker,
-        the identical idea applied to the candle-count factor instead of
-        the fan. Always shows the real current count (1 or 2), the same
-        way fan_marker always shows OFF/ON rather than appearing only
-        after a change -- consistent, not a second state machine for
-        "has this been touched"."""
-        if frac is None:
-            self._candle_marker_frac = None
-            self.candle_marker.hide()
-            self._update_fan_row_visibility()
-            return
-        self._candle_marker_frac = frac
-        self.candle_marker.setText("🕯️🕯️  2 candles" if count == 2 else "🕯️  1 candle")
-        self.candle_marker.setStyleSheet(
-            "background: rgba(24, 30, 42, 220); color: "
-            f"{TEXT_DIM}; font-size: 13px; font-weight: 700;"
-            "border-radius: 10px; padding: 4px 10px;")
-        self.candle_marker.adjustSize()
-        self._update_fan_row_visibility()
-        self._position_candle_marker()
-        self.candle_marker.show()
-        self.candle_marker.raise_()
-
-    def _position_candle_marker(self) -> None:
-        """Clamped against where the thermometer's own reserved right
-        column sits (the same x _position_thermometer itself computes),
-        unlike fan_marker (whose vent x-fraction never reaches that far
-        right in this study's geometry) -- the candle sits close to the
-        room's right edge, which put this marker directly under "Whole
-        room average" before this clamp, a real screenshotted overlap.
-
-        Computed from thermometer.width() (a fixed 148, set once at
-        construction) rather than thermometer.geometry()/isVisible(),
-        which are only ever as fresh as the last time
-        _position_thermometer happened to run -- set_candle_marker can
-        fire (via _update_fan_marker, from _load_case) before that has
-        ever happened for the render pass in progress, which left this
-        clamp silently skipped and the marker under the thermometer
-        anyway, a real bug an early version of this fix still had."""
-        if self._candle_marker_frac is None or self.fan_row.width() <= 0:
-            return
-        fx, _fy = self._candle_marker_frac
-        x = int(fx * self.width() - self.fan_row.x() - self.candle_marker.width() / 2)
-        y = (self.fan_row.height() - self.candle_marker.height()) // 2
-        reserved_x = self.width() - self.thermometer.width() - 14
-        right_limit = min(self.fan_row.width() - self.candle_marker.width() - 4,
-                          reserved_x - self.fan_row.x() - self.candle_marker.width() - 8)
-        x = max(4, min(x, right_limit))
-        self.candle_marker.move(x, max(0, y))
-
     def _update_fan_row_visibility(self) -> None:
-        """fan_row is shared by both markers -- shown whenever *either*
-        has something to anchor, hidden only when neither does. Without
-        this, whichever marker's setter ran last would unilaterally hide
-        the row out from under the other one."""
-        self.fan_row.setVisible(
-            self._fan_marker_frac is not None or self._candle_marker_frac is not None)
+        """fan_row holds fan_marker alone now (the candle-count marker
+        that used to share it was removed -- the count is already legible
+        both in the scene itself, drawn candle-by-candle, and in the
+        Candles toggle's own checked state, so a third copy of the same
+        fact was crowding this corner of the screen for nothing new)."""
+        self.fan_row.setVisible(self._fan_marker_frac is not None)
 
     def pulse_fan_marker(self) -> None:
         """A brief bounce on the fan/vent marker -- the vent's own "I
@@ -710,7 +646,6 @@ class PublicOverlay(QtWidgets.QWidget):
                          self.height() - self.stages.height() - 6)
         self._position_thermometer()
         self._position_fan_marker()
-        self._position_candle_marker()
         self._position_mascot()
 
     # Reserved below the thermometer -- kept out of its own height budget
@@ -758,6 +693,13 @@ class PublicOverlay(QtWidgets.QWidget):
             # Docked just outside the room's real right wall, not
             # centred on it -- the wall itself stays visible, the
             # thermometer reads as "attached to the room" beside it.
+            # In practice this offset rarely binds: the room's right
+            # wall (ROOM_X[1]) is the domain's own right edge, i.e. the
+            # scene's full-bleed right edge too, so there is no real
+            # "outside the wall" space at 800x600 -- the clamp below
+            # (screen width minus the thermometer's own width) is what
+            # actually places it. Left in case a wider display ever
+            # gives this room to matter.
             x = anchor * self.width() + 10
         else:
             x = self.width() - self.thermometer.width() - 14
@@ -769,7 +711,15 @@ class PublicOverlay(QtWidgets.QWidget):
         if button_rights:
             x = max(x, max(button_rights) + 12)
         self.thermometer.resize(self.thermometer.width(), height)
-        self.thermometer.move(min(x, self.width() - self.thermometer.width() - 4), top)
+        # int(): `anchor` (and so `x`) can be a numpy.float64 -- extent
+        # values come straight from the store's own array metadata --
+        # and QWidget.move() rejects that type outright. Previously
+        # masked by the fallback clamp below always winning with a plain
+        # int and min() returning it unchanged; now that SCENE_WIDTH_FRAC
+        # gives the anchor branch real room to be the smaller (and so
+        # winning) operand, the unconverted numpy type reached move()
+        # directly and raised.
+        self.thermometer.move(int(min(x, self.width() - self.thermometer.width() - 4)), top)
 
     def _position_mascot(self) -> None:
         """Pin the mascot bottom-left and the bubble to its right, both

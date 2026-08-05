@@ -3788,10 +3788,16 @@ class TestFindHottestGame:
 
     @staticmethod
     def _pos_for(experience, x, z):
+        # Routed through the scene's own widget_fraction_for rather than
+        # a second copy of its formula: the scene only renders into
+        # SCENE_WIDTH_FRAC of the widget's width now (a real, reserved
+        # right-hand column for the thermometer, never drawn into -- see
+        # PublicScene.SCENE_WIDTH_FRAC), and a hand-rolled full-bleed
+        # version of this helper would compute tap positions past the
+        # scene's actual right edge, landing in that reserved column
+        # instead of on the vent/candle/etc. this is supposed to tap.
         canvas = experience.scene.view.canvas
-        x0, x1, z0, z1 = experience.scene.view._extent
-        fx = (x - x0) / (x1 - x0)
-        fy = 1.0 - (z - z0) / (z1 - z0)
+        fx, fy = experience.scene.widget_fraction_for(x, z)
         return QtCore.QPoint(
             min(canvas.width() - 1, max(0, int(fx * canvas.width()))),
             min(canvas.height() - 1, max(0, int(fy * canvas.height()))))
@@ -3904,10 +3910,11 @@ class TestHotOrColdGame:
         experience.time_controller.pause()
         hot_x, hot_z, hot_value = experience.scene.hottest_point_at(experience.state.frame_index)
         assert experience.scene.candle_hit(hot_x, hot_z)   # the setup this test needs
+        # Routed through widget_fraction_for -- see TestFlamePulse._pos_for's
+        # own comment on why a hand-rolled full-bleed formula here would
+        # miss (PublicScene.SCENE_WIDTH_FRAC).
         canvas = experience.scene.view.canvas
-        x0, x1, z0, z1 = experience.scene.view._extent
-        fx = (hot_x - x0) / (x1 - x0)
-        fy = 1.0 - (hot_z - z0) / (z1 - z0)
+        fx, fy = experience.scene.widget_fraction_for(hot_x, hot_z)
         pos = QtCore.QPoint(min(canvas.width() - 1, int(fx * canvas.width())),
                             min(canvas.height() - 1, int(fy * canvas.height())))
 
@@ -4165,10 +4172,16 @@ class TestVentTap:
 
     @staticmethod
     def _pos_for(experience, x, z):
+        # Routed through the scene's own widget_fraction_for rather than
+        # a second copy of its formula: the scene only renders into
+        # SCENE_WIDTH_FRAC of the widget's width now (a real, reserved
+        # right-hand column for the thermometer, never drawn into -- see
+        # PublicScene.SCENE_WIDTH_FRAC), and a hand-rolled full-bleed
+        # version of this helper would compute tap positions past the
+        # scene's actual right edge, landing in that reserved column
+        # instead of on the vent/candle/etc. this is supposed to tap.
         canvas = experience.scene.view.canvas
-        x0, x1, z0, z1 = experience.scene.view._extent
-        fx = (x - x0) / (x1 - x0)
-        fy = 1.0 - (z - z0) / (z1 - z0)
+        fx, fy = experience.scene.widget_fraction_for(x, z)
         return QtCore.QPoint(
             min(canvas.width() - 1, max(0, int(fx * canvas.width()))),
             min(canvas.height() - 1, max(0, int(fy * canvas.height()))))
@@ -4307,9 +4320,13 @@ class TestVentActivityGlow:
         assert experience.scene._vent_activity_patch.get_radius() >= base_r
 
 
-class TestCandleMarkerMemory:
-    """Phase 11 section 7: the candle's own "I changed this" memory,
-    mirroring the fan/vent's existing fan_marker."""
+class TestFanRowVisibility:
+    """fan_row now holds only fan_marker -- the candle-count marker that
+    used to share it was removed (see PublicOverlay._update_fan_row_
+    visibility): the count is already legible both in the scene itself,
+    drawn candle-by-candle, and in the Candles toggle's own checked
+    state, so a third copy of the same fact was crowding this corner of
+    the screen (a real, screenshotted complaint) for nothing new."""
 
     @pytest.fixture
     def experience(self, qapp):
@@ -4325,46 +4342,19 @@ class TestCandleMarkerMemory:
         yield window.public_experience
         window.close()
 
-    def test_shows_the_real_baseline_count(self, experience):
-        experience._begin_journey()
-        experience._start_observe()
-        assert not experience.overlay.candle_marker.isHidden()
-        assert "1" in experience.overlay.candle_marker.text()
-
-    def test_updates_on_a_real_candle_change(self, experience):
-        experience._begin_journey()
-        experience._start_observe()
-
-        experience._on_explore_changed("candles", 1)
-
-        assert "2" in experience.overlay.candle_marker.text()
-
-    def test_never_overlaps_the_thermometers_reserved_column(self, experience, qapp):
-        """A real, screenshotted overlap this clamp fixes: the candle
-        sits close to the room's right edge, directly under "Whole room
-        average" before _position_candle_marker clamped against the
-        thermometer's own left edge."""
-        experience._begin_journey()
-        experience._start_observe()
-        for _ in range(6):
-            qapp.processEvents()
-        marker_right = (experience.overlay.candle_marker.geometry().x()
-                        + experience.overlay.fan_row.x()
-                        + experience.overlay.candle_marker.width())
-        assert marker_right <= experience.overlay.thermometer.geometry().left()
-
-    def test_shares_fan_row_without_hiding_each_other(self, experience):
-        """set_fan_marker(None, ...) must not hide fan_row out from under
-        an already-visible candle_marker (or vice versa) -- the row is
-        shown whenever *either* marker has something to anchor."""
+    def test_shown_while_the_fan_marker_has_something_to_anchor(self, experience):
         experience._begin_journey()
         experience._start_observe()
         assert not experience.overlay.fan_row.isHidden()
+        assert not experience.overlay.fan_marker.isHidden()
+
+    def test_hidden_once_the_fan_marker_is_cleared(self, experience):
+        experience._begin_journey()
+        experience._start_observe()
 
         experience.overlay.set_fan_marker(None, False)
 
-        assert not experience.overlay.fan_row.isHidden()   # candle_marker keeps it open
-        assert not experience.overlay.candle_marker.isHidden()
+        assert experience.overlay.fan_row.isHidden()
 
 
 class TestIdleVentHint:
@@ -4462,10 +4452,16 @@ class TestFanStateConsistency:
 
     @staticmethod
     def _pos_for(experience, x, z):
+        # Routed through the scene's own widget_fraction_for rather than
+        # a second copy of its formula: the scene only renders into
+        # SCENE_WIDTH_FRAC of the widget's width now (a real, reserved
+        # right-hand column for the thermometer, never drawn into -- see
+        # PublicScene.SCENE_WIDTH_FRAC), and a hand-rolled full-bleed
+        # version of this helper would compute tap positions past the
+        # scene's actual right edge, landing in that reserved column
+        # instead of on the vent/candle/etc. this is supposed to tap.
         canvas = experience.scene.view.canvas
-        x0, x1, z0, z1 = experience.scene.view._extent
-        fx = (x - x0) / (x1 - x0)
-        fy = 1.0 - (z - z0) / (z1 - z0)
+        fx, fy = experience.scene.widget_fraction_for(x, z)
         return QtCore.QPoint(
             min(canvas.width() - 1, max(0, int(fx * canvas.width()))),
             min(canvas.height() - 1, max(0, int(fy * canvas.height()))))
@@ -4801,10 +4797,16 @@ class TestTemperatureHunt:
 
     @staticmethod
     def _pos_for(experience, x, z):
+        # Routed through the scene's own widget_fraction_for rather than
+        # a second copy of its formula: the scene only renders into
+        # SCENE_WIDTH_FRAC of the widget's width now (a real, reserved
+        # right-hand column for the thermometer, never drawn into -- see
+        # PublicScene.SCENE_WIDTH_FRAC), and a hand-rolled full-bleed
+        # version of this helper would compute tap positions past the
+        # scene's actual right edge, landing in that reserved column
+        # instead of on the vent/candle/etc. this is supposed to tap.
         canvas = experience.scene.view.canvas
-        x0, x1, z0, z1 = experience.scene.view._extent
-        fx = (x - x0) / (x1 - x0)
-        fy = 1.0 - (z - z0) / (z1 - z0)
+        fx, fy = experience.scene.widget_fraction_for(x, z)
         return QtCore.QPoint(
             min(canvas.width() - 1, max(0, int(fx * canvas.width()))),
             min(canvas.height() - 1, max(0, int(fy * canvas.height()))))
@@ -4881,10 +4883,16 @@ class TestMysteryExperiment:
 
     @staticmethod
     def _pos_for(experience, x, z):
+        # Routed through the scene's own widget_fraction_for rather than
+        # a second copy of its formula: the scene only renders into
+        # SCENE_WIDTH_FRAC of the widget's width now (a real, reserved
+        # right-hand column for the thermometer, never drawn into -- see
+        # PublicScene.SCENE_WIDTH_FRAC), and a hand-rolled full-bleed
+        # version of this helper would compute tap positions past the
+        # scene's actual right edge, landing in that reserved column
+        # instead of on the vent/candle/etc. this is supposed to tap.
         canvas = experience.scene.view.canvas
-        x0, x1, z0, z1 = experience.scene.view._extent
-        fx = (x - x0) / (x1 - x0)
-        fy = 1.0 - (z - z0) / (z1 - z0)
+        fx, fy = experience.scene.widget_fraction_for(x, z)
         return QtCore.QPoint(
             min(canvas.width() - 1, max(0, int(fx * canvas.width()))),
             min(canvas.height() - 1, max(0, int(fy * canvas.height()))))
@@ -5672,10 +5680,11 @@ class TestWhyButton:
         from schematic import ROOM_Z
 
         def pos_for(x, z):
+            # See TestFlamePulse._pos_for's comment: routed through
+            # widget_fraction_for rather than a hand-rolled full-bleed
+            # formula, which would miss past PublicScene.SCENE_WIDTH_FRAC.
             canvas = experience.scene.view.canvas
-            x0, x1, z0, z1 = experience.scene.view._extent
-            fx = (x - x0) / (x1 - x0)
-            fy = 1.0 - (z - z0) / (z1 - z0)
+            fx, fy = experience.scene.widget_fraction_for(x, z)
             return QtCore.QPoint(min(canvas.width() - 1, max(0, int(fx * canvas.width()))),
                                  min(canvas.height() - 1, max(0, int(fy * canvas.height()))))
 

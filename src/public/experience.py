@@ -572,10 +572,9 @@ class PublicExperience(QtWidgets.QWidget):
         scenario is now loaded -- None/hidden when this study has no
         manifest entry or the current plane isn't the one the geometry
         is defined against (PublicScene.vent_marker_position's own gate).
-        Updates the candle marker (Phase 11 section 7) and the
-        thermometer's room-wall anchor in the same breath -- all three
-        are the scene's own real-geometry positions and always go stale
-        together on a scenario switch."""
+        Updates the thermometer's room-wall anchor in the same breath --
+        both are the scene's own real-geometry positions and always go
+        stale together on a scenario switch."""
         position = self.scene.vent_marker_position(self.state.case_index)
         if position is None:
             self.overlay.set_fan_marker(None, False)
@@ -583,14 +582,6 @@ class PublicExperience(QtWidgets.QWidget):
             frac = self.scene.widget_fraction_for(*position)
             entry = self.scene.current_entry()
             self.overlay.set_fan_marker(frac, entry is not None and entry.vod == 2)
-        candle_position = self.scene.candle_marker_position(self.state.case_index)
-        if candle_position is None:
-            self.overlay.set_candle_marker(None, 1)
-        else:
-            candle_frac = self.scene.widget_fraction_for(*candle_position)
-            entry = self.scene.current_entry()
-            count = 2 if (entry is not None and entry.candles == 1) else 1
-            self.overlay.set_candle_marker(candle_frac, count)
         wall_position = self.scene.room_wall_anchor(self.state.case_index)
         if wall_position is None:
             self.overlay.set_thermometer_anchor(None)
@@ -598,16 +589,13 @@ class PublicExperience(QtWidgets.QWidget):
             wall_frac_x, _wall_frac_y = self.scene.widget_fraction_for(*wall_position)
             self.overlay.set_thermometer_anchor(wall_frac_x)
 
-    def _hide_fan_and_candle_markers(self) -> None:
-        """Both markers share fan_row's visibility (see PublicOverlay.
-        _update_fan_row_visibility): hiding only one of them here would
-        leave the row visible -- and stealing vertical space from a
-        phase (SCIENCE, a compare detour) that has no vent/candle to
-        show at all -- on the strength of the *other* marker's now-stale
-        frac from whatever OBSERVE visit last set it. A real, measured
-        HeroMetric clip on the SCIENCE card was caused by exactly this."""
+    def _hide_fan_marker(self) -> None:
+        """Hides the fan label -- stealing vertical space from a phase
+        (SCIENCE, a compare detour) that has no vent to show at all, on
+        the strength of a now-stale frac from whatever OBSERVE visit
+        last set it, caused a real, measured HeroMetric clip on the
+        SCIENCE card before this."""
         self.overlay.set_fan_marker(None, False)
-        self.overlay.set_candle_marker(None, 1)
 
     def _load_case(self, case_index) -> None:
         if case_index is None:
@@ -919,7 +907,7 @@ class PublicExperience(QtWidgets.QWidget):
         self.scene.clear_probe(keep_trail=same_screen_rerender)
         self._reset_probe_state()
         if phase not in FAN_MARKER_PHASES:
-            self._hide_fan_and_candle_markers()
+            self._hide_fan_marker()
         else:
             self._update_fan_marker()
         if phase not in (Phase.OBSERVE, Phase.GAME_PLAY):
@@ -937,6 +925,17 @@ class PublicExperience(QtWidgets.QWidget):
         # visibility instead, a real bug that put the thermometer at the
         # wrong height (see set_thermometer_visible's docstring).
         self.overlay.set_thermometer_visible(phase in PROBE_PHASES)
+        # Re-flow the mascot bubble now that the thermometer's real
+        # visibility/position for *this* phase is known. handler() above
+        # already called overlay.say() once (most phases open with one),
+        # and that call's own bubble-width clamp ran against whatever
+        # phase was on screen *before* this one -- e.g. entering OBSERVE
+        # from INTRO, where the thermometer is hidden, sized the bubble
+        # with no thermometer clamp at all, and nothing re-flowed it
+        # afterward. A real, measured overlap: the bubble's own sizeHint
+        # reached ~160px past the thermometer's left edge in an 800x600
+        # screenshot.
+        self.overlay._position_mascot()
         if phase in PROBE_PHASES:
             # REVEAL/SCIENCE are static (no playback tick to refresh it
             # through _on_time_changed), so without this the thermometer
@@ -1328,7 +1327,7 @@ class PublicExperience(QtWidgets.QWidget):
         self.overlay.clear_buttons()
         self.overlay.set_meters_visible(False)
         self.overlay.set_explore_visible(False)
-        self._hide_fan_and_candle_markers()
+        self._hide_fan_marker()
         self.overlay.set_prompt("")
 
     def _on_compare_requested(self) -> None:

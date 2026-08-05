@@ -292,15 +292,18 @@ class Thermometer(QtWidgets.QWidget):
         self._anim.setDuration(280)
         self._anim.setEasingCurve(QtCore.QEasingCurve.OutCubic)
         self._anim.valueChanged.connect(self._on_anim_value)
-        # 200 -> 232: the painted tube below (see _paint_tube) was thin
-        # relative to this widget's own footprint and read as a flat HUD
-        # chip rather than an instrument (Design Review §6) -- widened to
-        # give the enlarged tube/bulb room without crowding the numeric
-        # readout beside it. All positioning that depends on this width
-        # (PublicOverlay._position_thermometer) already reads
-        # self.thermometer.width() rather than a hardcoded 200, so this
-        # is a pure size change, not a layout rewrite.
-        self.setFixedWidth(232)
+        # 200 -> 232 -> 184: the painted tube below (see _paint_tube) was
+        # thin relative to this widget's own footprint and read as a flat
+        # HUD chip rather than an instrument (Design Review §6) -- first
+        # widened to give the enlarged tube/bulb room, then pulled back
+        # in once the scene itself stopped rendering full-bleed
+        # (PublicScene.SCENE_WIDTH_FRAC) specifically to give this widget
+        # a real, dedicated, never-drawn-into column -- 232 didn't
+        # comfortably fit that column's own width. All positioning that
+        # depends on this width (PublicOverlay._position_thermometer)
+        # already reads self.thermometer.width() rather than a hardcoded
+        # constant, so this is a pure size change, not a layout rewrite.
+        self.setFixedWidth(184)
         self.setMinimumHeight(360)
 
         layout = QtWidgets.QVBoxLayout(self)
