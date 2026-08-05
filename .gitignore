@@ -47,6 +47,13 @@ report/*.lot
 report/*.synctex.gz
 protocol/*.synctex.gz
 
+# Personal internship report -- not part of the tracked project report
+# (report/report.tex / report/report.pdf)
+report/internship_report.*
+
+# Stray pasted screenshot
+c02820575ba4a546b4b54e63f97dbdf8.png
+
 # Session/tooling local state
 .claude/
 
