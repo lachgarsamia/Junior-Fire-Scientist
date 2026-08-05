@@ -117,7 +117,11 @@ class PublicOverlay(QtWidgets.QWidget):
         self.explore_panel.setStyleSheet("background: transparent;")
         explore_layout = QtWidgets.QHBoxLayout(self.explore_panel)
         explore_layout.setContentsMargins(0, 0, 0, 0)
-        explore_layout.setSpacing(20)
+        # 20 -> 12: fit a third group (the vent2 control) at 800x600
+        # without any group's buttons shrinking below their own text --
+        # two groups had slack to spare, three did not (caught in an
+        # 800x600 screenshot: "OPEN"/"SHUT" clipped to "OPE"/"SHU" at 20).
+        explore_layout.setSpacing(12)
         explore_layout.addStretch(1)
         self._explore_layout = explore_layout
         # Toggles are inserted at this index (see set_explore_controls),

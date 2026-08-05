@@ -975,6 +975,9 @@ class PublicExperience(QtWidgets.QWidget):
         if self.scene.vent_hit(x, z, self.state.case_index):
             self._on_vent_tapped()
             return
+        if self.scene.vent2_hit(x, z, self.state.case_index):
+            self._on_vent2_tapped()
+            return
         if self.scene.candle_hit(x, z):
             self.scene.pulse_flame()
             self._on_candle_tapped(value)
@@ -990,10 +993,13 @@ class PublicExperience(QtWidgets.QWidget):
         dispatches on which one (self._active_game), reusing exactly the
         same handlers Explore's own tap used to call directly."""
         game = self._active_game
-        if (game in ("compare", "map", "mystery")
-                and self.scene.vent_hit(x, z, self.state.case_index)):
-            self._on_vent_tapped()
-            return
+        if game in ("compare", "map", "mystery"):
+            if self.scene.vent_hit(x, z, self.state.case_index):
+                self._on_vent_tapped()
+                return
+            if self.scene.vent2_hit(x, z, self.state.case_index):
+                self._on_vent2_tapped()
+                return
         if self.scene.candle_hit(x, z):
             self.scene.pulse_flame()
             # The real hottest cell is almost always at (or right beside)
@@ -1151,13 +1157,36 @@ class PublicExperience(QtWidgets.QWidget):
 
     def _on_vent_tapped(self) -> None:
         """The vent is a real tappable object in the scene, not just an
-        external toggle -- flips the SAME "fan" explore control a real
-        click on its own button would, by clicking that actual widget
-        (so its checked state, and everything _on_explore_changed does,
-        stays the single source of truth rather than a second code path
-        that could drift from it)."""
-        control = next((c for c in self._explore_controls if c.key == "fan"), None)
-        toggle = self.overlay._explore_toggles.get("fan")
+        external toggle -- see _toggle_explore_control_by_tap, which
+        this and _on_vent2_tapped both share."""
+        self._toggle_explore_control_by_tap("fan", vent_index=0)
+        # Deferred to the next event-loop turn so the marker's geometry
+        # is already the *new* (post-switch) one when the pulse captures
+        # it -- pulsing before the click would animate back to a rect
+        # that set_fan_marker's own reposition immediately overrides.
+        self._defer(0, self.overlay.pulse_fan_marker)
+
+    def _on_vent2_tapped(self) -> None:
+        """The second (candle-side) vent is a real tappable object too --
+        same idea as _on_vent_tapped, against the "vent2" control and the
+        second vent line (index 1 in the shared room_vents
+        LineCollection, see PublicScene.pulse_vent). No floating marker
+        label: unlike the fan, this vent's open/closed state is already
+        visible in the vent glyph itself (PublicScene._draw_vent2's slat
+        angle/colour) and in the ExploreToggle's own checked state, so it
+        doesn't need a second copy of set_fan_marker's whole subsystem
+        (see the redesign brief's "do not create duplicate systems" rule)."""
+        self._toggle_explore_control_by_tap("vent2", vent_index=1)
+
+    def _toggle_explore_control_by_tap(self, control_key: str, vent_index: int) -> None:
+        """Flip the named explore control by clicking its actual toggle
+        widget (so its checked state, and everything _on_explore_changed
+        does, stays the single source of truth rather than a second code
+        path that could drift from it), then flash the tapped vent's own
+        drawn line so the tap reads as "I touched a machine and it
+        reacted", not "a setting changed" (Phase 9 section 3/11)."""
+        control = next((c for c in self._explore_controls if c.key == control_key), None)
+        toggle = self.overlay._explore_toggles.get(control_key)
         entry = self.scene.current_entry()
         if control is None or toggle is None or entry is None:
             return
@@ -1166,15 +1195,7 @@ class PublicExperience(QtWidgets.QWidget):
         if current not in options:
             return
         toggle._group.button(1 - options.index(current)).click()
-        # Deferred to the next event-loop turn so the marker's geometry
-        # is already the *new* (post-switch) one when the pulse captures
-        # it -- pulsing before the click would animate back to a rect
-        # that set_fan_marker's own reposition immediately overrides.
-        self._defer(0, self.overlay.pulse_fan_marker)
-        # The vent itself flashes too -- not just the floating label --
-        # so the tap reads as "I touched a machine and it reacted", not
-        # "a setting changed" (Phase 9 section 3/11).
-        self.scene.pulse_vent()
+        self.scene.pulse_vent(vent_index)
         self._defer(self._VENT_PULSE_MS, self.scene.reset_vent_width)
 
     def _defer(self, delay_ms: int, callback) -> None:

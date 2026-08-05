@@ -243,13 +243,26 @@ class ExploreControl:
             self.case_for(manifest, opt.value) is not None for opt in self.options)
 
 
-# Two explore controls, both real factors in this study's own factorial
+# Three explore controls, all real factors in this study's own factorial
 # (candles x door x vod x voc, all 24 combinations present -- see
-# manifest.factor_counts). Door and the candle vent (voc) are left out
-# deliberately: this is a free-play sandbox meant to be grasped in a
-# glance, and the door's measured effect is close to null (see the module
-# docstring), so exposing it here would teach the opposite of what the
-# fan control teaches in the same breath.
+# manifest.factor_counts). The door alone is left out: this is a
+# free-play sandbox meant to be grasped in a glance, and the door's
+# measured effect is close to null (see the module docstring), so
+# exposing it here would teach the opposite of what the fan control
+# teaches in the same breath.
+#
+# The candle-side vent (voc, "vent2" below) *is* exposed, deliberately,
+# even though it measures just as null as the door:
+#   voc open -> closed, vod=0 (baseline): mean air speed 0.085 ->
+#     0.076 m/s (below the 0.02 m/s noticeable_delta), room temp 26.5 ->
+#     26.3 C (below the 0.3 C one) -- measured the same way the module
+#     docstring's door numbers were, not assumed identical to them.
+# Unlike the door, this is a real physical vent visitors can see and
+# reach in the scene (PublicScene draws it next to the candle), and the
+# existing noticeable_delta honesty machinery already reports "about the
+# same" rather than dressing up a null result -- so toggling it teaches
+# a real, honest lesson ("not everything you can touch changes much")
+# instead of a fabricated one.
 EXPLORE_CONTROLS = (
     ExploreControl(
         "fan", "control_fan_label", "💨", "vod",
@@ -260,6 +273,11 @@ EXPLORE_CONTROLS = (
         (ExploreOption(0, "option_one_candle", "🕯️"),
          ExploreOption(1, "option_two_candles", "🕯️🕯️")),
         held={"door": 1, "vod": 0, "voc": 0}),
+    ExploreControl(
+        "vent2", "control_vent2_label", "🪟", "voc",
+        (ExploreOption(0, "option_vent_open", "🔓"),
+         ExploreOption(1, "option_vent_closed", "🔒")),
+        held={"candles": 0, "door": 1, "vod": 0}),
 )
 
 

@@ -441,10 +441,13 @@ TRANSLATIONS = {
     # -- experiments.py: EXPLORE_CONTROLS ---------------------------------
     "control_fan_label": {"en": "Fan", "de": "Ventilator"},
     "control_candles_label": {"en": "Candles", "de": "Kerzen"},
+    "control_vent2_label": {"en": "Vent", "de": "Lüftung"},
     "option_off": {"en": "OFF", "de": "AUS"},
     "option_on": {"en": "ON", "de": "AN"},
     "option_one_candle": {"en": "1", "de": "1"},
     "option_two_candles": {"en": "2", "de": "2"},
+    "option_vent_open": {"en": "OPEN", "de": "OFFEN"},
+    "option_vent_closed": {"en": "SHUT", "de": "ZU"},
 
     # -- experiments.py: PUBLIC_METRICS -----------------------------------
     "metric_stronger": {"en": "stronger", "de": "stärker"},

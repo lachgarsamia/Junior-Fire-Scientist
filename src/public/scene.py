@@ -93,6 +93,25 @@ _FAN_N_BLADES = 4
 # activity), which *is* tied to a measured quantity.
 _FAN_SPIN_RADIANS_PER_FRAME = 0.5
 
+# The second vent's own object: a small louvered flap, not a powered
+# fan (voc has no HVAC state, just open/closed -- schematic._VOC_STATES),
+# so it has no blades to spin. Two discrete states rather than a
+# per-frame animation: closed = flat slats flush with the frame
+# (blocking), open = slats tilted with visible gaps between them.
+#
+# Deliberately smaller than the fan housing: this vent's real position
+# (x=0.86-0.94, near the room's far/right wall) sits right where the
+# thermometer docks (PublicScene.room_wall_anchor is that same wall) --
+# at the fan's own scale this collided with the thermometer's tick
+# labels in an 800x600 screenshot. Physical position is never adjusted
+# to dodge that (it would misrepresent the real vent location); only
+# the rendered size is reduced.
+_VENT2_FRAME_HALF_WIDTH_M = 0.016
+_VENT2_SLAT_LENGTH_M = 0.026
+_VENT2_N_SLATS = 3
+_VENT2_CLOSED_ANGLE = 0.0                 # flush, horizontal
+_VENT2_OPEN_ANGLE = math.pi / 5           # tilted open
+
 
 def _flame_vertices(cx: float, base_z: float, height: float, width_ratio: float = 0.42) -> list:
     """A rounded teardrop outline, `height` above (cx, base_z) -- the data-
@@ -115,6 +134,17 @@ def _fan_blade_endpoints(cx: float, cz: float, angle: float, length: float) -> t
     _flame_vertices feeds a Polygon's set_xy."""
     dx, dz = math.cos(angle), math.sin(angle)
     return ([cx, cx + dx * length], [cz, cz + dz * length])
+
+
+def _vent2_slat_endpoints(cx: float, cz: float, row: int, angle: float, length: float) -> tuple:
+    """(xs, ys) for one horizontal louvre slat of the second vent,
+    `row` steps above/below the frame centre (cz), tilted by `angle`
+    radians off horizontal -- 0 (closed) is flush, _VENT2_OPEN_ANGLE
+    (open) shows a gap to the slat above/below it."""
+    rz = cz + row * (_VENT2_FRAME_HALF_WIDTH_M * 0.75)
+    half = length / 2
+    dx, dz = math.cos(angle), math.sin(angle)
+    return ([cx - dx * half, cx + dx * half], [rz - dz * half, rz + dz * half])
 
 
 class PublicScene(QtWidgets.QWidget):
@@ -186,6 +216,16 @@ class PublicScene(QtWidgets.QWidget):
         self._fan_blades: list = []
         self._fan_blade_angle = 0.0
         self._fan_signature: Optional[tuple] = None
+        # The second vent (voc, "vent2"): a frame + louvre slats, all
+        # static -- no activity glow and no per-frame spin, since voc has
+        # no HVAC state to drive one (schematic._VOC_STATES is just
+        # open/closed). Only redrawn when the position or open/closed
+        # state actually changes (_vent2_signature covers both, unlike
+        # _fan_signature which is position alone -- the fan's own state
+        # is shown by whether it spins, this vent's only by slat angle).
+        self._vent2_frame_patch = None
+        self._vent2_slats: list = []
+        self._vent2_signature: Optional[tuple] = None
         # Hot/Cold's two simultaneous markers -- separate scatter artists
         # from SliceView.hover_highlight (which the researcher app's
         # Context Panel hover also uses), so this never touches shared
@@ -256,6 +296,7 @@ class PublicScene(QtWidgets.QWidget):
         self._draw_candles(case_index)
         self._draw_fan(case_index)
         self._update_vent_activity(case_index)
+        self._draw_vent2(case_index)
         self.clear_probe()
         return int(self._temperature.shape[0])
 
@@ -437,6 +478,56 @@ class PublicScene(QtWidgets.QWidget):
             self._fan_blades.append(blade)
         self.view.canvas.capture_background()
 
+    def _draw_vent2(self, case_index: int) -> None:
+        """The second vent's own object: a frame + louvre slats at the
+        real voc opening, drawn whenever a scenario has one -- same
+        "always present" reasoning _draw_fan gives for the fan (Design
+        Review §6 Priority 1 generalizes to any tappable device here, not
+        just the powered one). All static: voc has only open/closed
+        states (schematic._VOC_STATES), no HVAC speed to animate, so
+        unlike the fan's blades these never need a per-frame update --
+        only a redraw when the position or open/closed state changes.
+
+        Same redundant-redraw guard _draw_fan/_draw_candles use, keyed on
+        (position, is_open) rather than position alone, since this is
+        what has to change to justify touching the patches.
+        """
+        entry = self._entry(case_index)
+        position = self.vent2_marker_position(case_index)
+        is_open = entry is not None and entry.voc == 0
+        signature = (position, is_open)
+        if signature == self._vent2_signature:
+            return
+        self._vent2_signature = signature
+        if self._vent2_frame_patch is not None:
+            self._vent2_frame_patch.remove()
+            self._vent2_frame_patch = None
+        for slat in self._vent2_slats:
+            slat.remove()
+        self._vent2_slats = []
+        if position is None:
+            self.view.canvas.capture_background()
+            return
+        vx, vz = position
+        frame = Rectangle(
+            (vx - _VENT2_FRAME_HALF_WIDTH_M, vz - _VENT2_FRAME_HALF_WIDTH_M),
+            _VENT2_FRAME_HALF_WIDTH_M * 2, _VENT2_FRAME_HALF_WIDTH_M * 2,
+            facecolor="#232B38", edgecolor="#8B96A8", linewidth=1.4, zorder=7)
+        self.view.ax.add_patch(frame)
+        self._vent2_frame_patch = frame
+        angle = _VENT2_OPEN_ANGLE if is_open else _VENT2_CLOSED_ANGLE
+        color = "#7DD3FC" if is_open else "#C3CCD9"
+        for row in range(-1, _VENT2_N_SLATS - 1):
+            xs, ys = _vent2_slat_endpoints(vx, vz, row, angle, _VENT2_SLAT_LENGTH_M)
+            slat = Line2D(xs, ys, color=color, linewidth=2.2,
+                         solid_capstyle="round", zorder=9)
+            self.view.ax.add_line(slat)
+            self._vent2_slats.append(slat)
+        # Static like the fan housing/candle body -- baked into the
+        # background once per state change, not part of the per-frame
+        # animated set.
+        self.view.canvas.capture_background()
+
     def _update_vent_activity(self, case_index: int) -> None:
         """A small activity glow at the vent's real position -- present
         only while the fan is actually ON (entry.vod == 2), matching
@@ -533,6 +624,19 @@ class PublicScene(QtWidgets.QWidget):
         (x0, z0, x1, _z1), _state = geometry["vents"][0]
         return ((x0 + x1) / 2, z0)
 
+    def vent2_marker_position(self, case_index: int) -> Optional[tuple]:
+        """Physical (x, z) at the second (candle-side) vent's real
+        ceiling opening -- the "voc" vent from schematic.room_overlay_
+        geometry, the same factor the "vent2" explore control drives
+        (see experiments.py). Same gating as vent_marker_position, just
+        against geometry["vents"][1] instead of [0]."""
+        entry = self._entry(case_index)
+        if entry is None or self._quantity_key.direction != 1:
+            return None
+        geometry = room_overlay_geometry(entry.door, entry.vod, entry.voc)
+        (x0, z0, x1, _z1), _state = geometry["vents"][1]
+        return ((x0 + x1) / 2, z0)
+
     def candle_marker_position(self, case_index: int) -> Optional[tuple]:
         """Physical (x, z) at the real candle burner(s)' own group
         midpoint -- the same anchor whether this scenario has 1 or 2
@@ -575,21 +679,43 @@ class PublicScene(QtWidgets.QWidget):
         return (abs(x - vx) <= self._VENT_TAP_RADIUS_M
                 and abs(z - vz) <= self._VENT_TAP_RADIUS_M)
 
-    def pulse_vent(self) -> None:
-        """A brief boosted-linewidth flash on the vent's own drawn line --
-        its "I felt that" acknowledgement for a direct tap (see
-        PublicExperience._on_vent_tapped), the same idea as the candle's
-        pulse_flame(). A one-shot flash rather than a per-frame effect:
-        unlike the flame, the vent segment doesn't otherwise change
-        between ticks, so there's nothing to piggyback the boost onto --
-        the caller restores it with reset_vent_width() after a short
-        delay (PublicExperience._defer(), not a new timer type)."""
+    def vent2_hit(self, x: float, z: float, case_index) -> bool:
+        """Same idea as vent_hit, against the second (voc) vent -- see
+        PublicExperience._on_overlay_tapped, which toggles the "vent2"
+        explore control when this is true."""
+        position = self.vent2_marker_position(case_index)
+        if position is None:
+            return False
+        vx, vz = position
+        return (abs(x - vx) <= self._VENT_TAP_RADIUS_M
+                and abs(z - vz) <= self._VENT_TAP_RADIUS_M)
+
+    def pulse_vent(self, vent_index: int = 0) -> None:
+        """A brief boosted-linewidth flash on one of the vent's own drawn
+        lines -- its "I felt that" acknowledgement for a direct tap (see
+        PublicExperience._on_vent_tapped/_on_vent2_tapped), the same idea
+        as the candle's pulse_flame(). A one-shot flash rather than a
+        per-frame effect: unlike the flame, the vent segments don't
+        otherwise change between ticks, so there's nothing to piggyback
+        the boost onto -- the caller restores it with reset_vent_width()
+        after a short delay (PublicExperience._defer(), not a new timer
+        type).
+
+        room_vents is one LineCollection holding both vent segments
+        (index 0 = vod/fan, 1 = voc/vent2), so the boosted width is set
+        as a per-segment array with only `vent_index` raised -- a plain
+        scalar set_linewidth would have pulsed both vents on either tap.
+        """
         if self.view.ax is None or self.view.room_vents is None:
             return
         if self._vent_pulse_base_lw is None:
             widths = self.view.room_vents.get_linewidths()
             self._vent_pulse_base_lw = widths[0] if len(widths) else 4.0
-        self.view.room_vents.set_linewidth(self._vent_pulse_base_lw * 1.8)
+        n = len(self.view.room_vents.get_segments())
+        widths = [self._vent_pulse_base_lw] * n
+        if 0 <= vent_index < n:
+            widths[vent_index] = self._vent_pulse_base_lw * 1.8
+        self.view.room_vents.set_linewidth(widths)
         self.view.canvas.capture_background()
         self.view.canvas.blit_update(self.view._animated_artists())
 
