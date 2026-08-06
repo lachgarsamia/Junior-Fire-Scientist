@@ -406,7 +406,19 @@ class Thermometer(QtWidgets.QWidget):
 
     # Tick values along the tube -- round numbers spanning this dataset's
     # real calibration ceiling (_DISPLAY_MAX_C), not an arbitrary scale.
-    _TICKS = (400, 300, 200, 100, 0)
+    # Denser below kid.SCALE_BREAK_C than above it: the tube's own non-
+    # linear scale (kid.temperature_scale_fraction) gives that range
+    # more physical height specifically so finer ticks fit there,
+    # matching what a visitor is actually watching move (room
+    # temperature, not the always-near-ceiling flame) -- the compressed
+    # 100-400 range only needs enough marks to show it's still a real
+    # graduated scale, not a precise readout. Two earlier, denser
+    # attempts (25 C steps below the break; then 100/200/300/400 above
+    # it) both packed labels into this tube's real on-screen height
+    # tightly enough to overlap into an illegible smear -- caught in
+    # screenshots, not assumed to fit just because the tube itself grew
+    # taller earlier this session.
+    _TICKS = (400, 100, 50, 0)
 
     def _paint_tube(self, painter: QtGui.QPainter) -> None:
         # 34/20 -> 48/28: Design Review §6 -- "reads as a flat HUD chip,
@@ -465,7 +477,7 @@ class Thermometer(QtWidgets.QWidget):
         font.setPointSizeF(max(9.0, font.pointSizeF() * 0.85))
         painter.setFont(font)
         for value in self._TICKS:
-            frac = min(1.0, value / self._DISPLAY_MAX_C)
+            frac = kid.temperature_scale_fraction(value, self._DISPLAY_MAX_C)
             y = rect.bottom() - frac * rect.height()
             painter.setPen(QtGui.QPen(QtGui.QColor(TEXT_DIM), 1.4))
             painter.drawLine(QtCore.QPointF(rect.left() - 9, y), QtCore.QPointF(rect.left() - 1, y))
@@ -478,7 +490,7 @@ class Thermometer(QtWidgets.QWidget):
 
         if shown is None:
             return
-        fraction = max(0.0, min(1.0, shown / self._DISPLAY_MAX_C))
+        fraction = kid.temperature_scale_fraction(shown, self._DISPLAY_MAX_C)
         fill_h = rect.height() * fraction
         fill = QtCore.QRectF(rect.x() + 4, rect.bottom() - fill_h, rect.width() - 8,
                              max(8.0, fill_h))

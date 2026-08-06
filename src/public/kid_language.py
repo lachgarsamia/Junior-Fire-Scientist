@@ -69,16 +69,46 @@ STRONG_AIRFLOW_KEYS = ("airflow_band_strong", "airflow_band_very_strong")
 _TEMPERATURE_BAND_COLORS = ("#5AA9E6", "#5FD68A", "#F5D547", "#FF9440", "#FF5A36", "#FF2E00")
 
 
+# The thermometer's tube is not a linear scale: 0-SCALE_BREAK_C gets
+# SCALE_BREAK_FRAC of the tube's own height, and SCALE_BREAK_C..display
+# ceiling gets the rest. Almost everything a visitor actually watches
+# change during free exploration (the "whole room average" reading)
+# sits well under 100 C -- the flame itself pins near the display
+# ceiling regardless of what's happening in the room, so giving that
+# range the same linear share as 0-100 C would waste most of the tube
+# on a number that barely moves. Shared by the fill height, the tick
+# marks, and the gradient stops (temperature_gradient_stops, below) so
+# all three always agree on where a given degree actually sits.
+SCALE_BREAK_C = 100.0
+SCALE_BREAK_FRAC = 0.62
+
+
+def temperature_scale_fraction(value_c: float, display_max_c: float) -> float:
+    """0..1 position along the thermometer's tube for `value_c`, using
+    the two-segment scale SCALE_BREAK_C/SCALE_BREAK_FRAC describe.
+    Clamped to [0, display_max_c] first -- same behaviour the old
+    linear mapping had for a value past the display ceiling."""
+    value_c = max(0.0, min(value_c, display_max_c))
+    if value_c <= SCALE_BREAK_C:
+        return SCALE_BREAK_FRAC * (value_c / SCALE_BREAK_C)
+    span = display_max_c - SCALE_BREAK_C
+    if span <= 0:
+        return 1.0
+    return SCALE_BREAK_FRAC + (1.0 - SCALE_BREAK_FRAC) * ((value_c - SCALE_BREAK_C) / span)
+
+
 def temperature_gradient_stops(display_max_c: float) -> list:
     """(position, hex_color) pairs for a full-height blue-to-red gradient
     brush, position 1.0 = coolest (bottom) to 0.0 = hottest (top) -- the
     exact same band boundaries/colours temperature_color()'s flat fill
     uses, just expressed as a continuous gradient so a partial fill
     reveals a smooth blue->red sweep instead of jumping between flat
-    colours as the reading crosses a band threshold."""
+    colours as the reading crosses a band threshold. Positions come from
+    temperature_scale_fraction, the same non-linear scale the tube's
+    fill height and tick marks use."""
     stops = []
     for (threshold, _label, _icon), color in zip(_TEMPERATURE_BANDS, _TEMPERATURE_BAND_COLORS):
-        frac = min(1.0, threshold / display_max_c)
+        frac = temperature_scale_fraction(min(threshold, display_max_c), display_max_c)
         stops.append((1.0 - frac, color))
     return stops
 
