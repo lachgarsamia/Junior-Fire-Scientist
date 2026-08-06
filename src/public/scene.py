@@ -71,15 +71,22 @@ _WICK_HEIGHT_M = 0.012
 # shows through the glow, visually fusing the two.
 #
 # Sized to reach well up into where the real (data-driven) hot plume
-# starts reading as fire-coloured -- a first pass at this (0.030 m, a
+# starts reading as fire-coloured -- an earlier pass at this (0.030 m, a
 # tight glow) left a visible gap that read as "a small toy candle next
-# to a separate, bigger fire" rather than one continuous flame (caught
-# in live testing, not a hypothetical). Taller layers plus a wider,
-# softer glow close that gap without changing what either layer
-# represents: the layers are still the same "here's the candle" prop,
-# the glow still just blends its edge into whatever real colour sits
-# above it.
-_FLAME_HEIGHT_M = 0.052
+# to a separate, bigger fire" rather than one continuous flame; a later
+# pass (0.052 m, a wider but still faint alpha=0.22 glow) plus bending
+# the layers toward the real plume's measured lean (_flame_lean_for)
+# fixed the *alignment* but not this -- direct repeated feedback was
+# that the candle still read as a small prop standing near a separate
+# fire, not its source. The remaining gap was size and weight, not
+# position: at 0.052 m tall and a faint glow, the schematic flame was
+# too small and too transparent to read as "the base of that fire"
+# once actually seen live, no matter how well it lined up. Raised
+# further and the glow made substantially more opaque so it reads as a
+# solid, present aura the real flame visibly grows out of, not a
+# smudge beside it -- still the same "here's the candle" prop, still
+# rooted at the real wick, never claiming a measurement.
+_FLAME_HEIGHT_M = 0.078
 _FLAME_LAYERS = (   # (height fraction, colour, lift fraction) outer -> core
     (1.00, "#D93415", 0.00),
     (0.70, "#FF8A1E", 0.06),
@@ -452,9 +459,13 @@ class PublicScene(QtWidgets.QWidget):
         """
         patches = []
         lean = self._flame_lean_for(cx, base_z)
-        glow_r = _FLAME_HEIGHT_M * 1.6
+        glow_r = _FLAME_HEIGHT_M * 1.5
+        # 0.22 -> 0.42: still translucent (it has to blend into whatever
+        # real colour is above it, not paint over it), but no longer so
+        # faint it read as barely there next to the real bloom's own
+        # saturation.
         glow = Circle((cx + lean * 0.5, base_z + _FLAME_HEIGHT_M * 0.5), glow_r,
-                      facecolor="#FF7A18", edgecolor="none", alpha=0.22, zorder=8)
+                      facecolor="#FF7A18", edgecolor="none", alpha=0.42, zorder=8)
         self.view.ax.add_patch(glow)
         patches.append(glow)
         self.view.add_animated_extra(glow)
