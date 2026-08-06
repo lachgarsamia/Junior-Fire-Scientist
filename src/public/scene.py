@@ -55,6 +55,22 @@ VELOCITY_KEY = SliceKey("VELOCITY", 1, 0)
 # thermometer's own size again against too little room.
 SCENE_WIDTH_FRAC = 0.70
 
+# The simulated *domain* is wider than the *room*: ROOM_X is only 0.27-
+# 1.0 of the full 0-1.0 m domain, so plotting the whole domain (as
+# _strip_chrome used to) wasted the left ~27% of the scene's own
+# SCENE_WIDTH_FRAC column on mostly-ambient air outside the room's own
+# wall -- direct feedback that the room itself looked narrow. Cropping
+# the axes' visible x-range to the room (plus a little breathing room
+# on the left, where there's no wall right at the frame edge to worry
+# about) lets the room fill nearly the whole scene column instead.
+# Z is deliberately left uncropped (the full domain height, not
+# ROOM_Z): the room's own height is only 0.22 of the 0.48 m domain, and
+# the space above it is exactly where the rising plume/smoke the
+# "where does the smoke go" prompt asks about actually goes -- cropping
+# that away would cut off the one thing this view exists to show.
+_VIEW_X_PAD_M = 0.15
+VIEW_X_RANGE = (ROOM_X[0] - _VIEW_X_PAD_M, ROOM_X[1])
+
 # Candle body drawn at the real burner location (schematic._CANDLE_X,
 # the floor). Sized small relative to the 1.0 x 0.48 m domain -- an
 # anchor for "the fire starts here", not a second flame; the actual fire
@@ -841,19 +857,28 @@ class PublicScene(QtWidgets.QWidget):
         (e.g. a fan-state label sitting at the actual vent). None outside
         the plotted extent.
 
-        The x fraction is scaled by SCENE_WIDTH_FRAC: the axes only
-        occupies that much of the widget's width (see _strip_chrome), so
-        a data fraction of 1.0 (the room's own right wall) has to land at
-        widget fraction SCENE_WIDTH_FRAC, not 1.0, or every real-geometry
-        marker (the vent labels, this widget's own thermometer anchor)
-        would sit past the axes' actual right edge, out in the reserved
-        thermometer column."""
+        The x fraction is computed against VIEW_X_RANGE, not the full
+        data extent's x0/x1 -- the axes is cropped to that range (see
+        _strip_chrome), so a physical x outside it isn't actually on
+        screen at all, and one at VIEW_X_RANGE's own edges has to land
+        at fraction 0/1 of the *visible* axes, not somewhere off to the
+        side of it. That result is then scaled by SCENE_WIDTH_FRAC: the
+        axes only occupies that much of the widget's width, so a view
+        fraction of 1.0 (the room's own right wall) has to land at
+        widget fraction SCENE_WIDTH_FRAC, not 1.0, or every real-
+        geometry marker (the vent labels, this widget's own thermometer
+        anchor) would sit past the axes' actual right edge, out in the
+        reserved thermometer column. Z is unaffected -- the view is not
+        cropped vertically, see VIEW_X_RANGE's own comment -- so it
+        still reads off the full data extent."""
         if self.view._extent is None:
             return None
-        x0, x1, z0, z1 = self.view._extent
-        if x1 == x0 or z1 == z0:
+        _x0, _x1, z0, z1 = self.view._extent
+        view_x0, view_x1 = VIEW_X_RANGE
+        if view_x1 == view_x0 or z1 == z0:
             return None
-        return (SCENE_WIDTH_FRAC * (x - x0) / (x1 - x0), 1.0 - (z - z0) / (z1 - z0))
+        return (SCENE_WIDTH_FRAC * (x - view_x0) / (view_x1 - view_x0),
+                1.0 - (z - z0) / (z1 - z0))
 
     def _strip_chrome(self) -> None:
         """Hide every scientific affordance: colorbar, axis frame, title.
@@ -878,6 +903,18 @@ class PublicScene(QtWidgets.QWidget):
         # Only an explicit set_position() overrides an explicitly-set
         # position.
         self.view.ax.set_position([0, 0, SCENE_WIDTH_FRAC, 1])
+        # Crop the visible x-range to the room (VIEW_X_RANGE), not the
+        # full simulated domain -- see VIEW_X_RANGE's own comment. This
+        # is a pure view/zoom (set_xlim), not a change to the plotted
+        # data or its extent: the underlying array and heatmap.imshow's
+        # own extent kwarg are untouched, so nothing that indexes into
+        # the array by physical (x, z) (probe_value_at, _extreme_point_
+        # at, measure_case_at, the baseline ghost contour) needs to
+        # change. Only the screen-pixel<->physical conversions
+        # (widget_fraction_for, probe_at) do, since those describe what
+        # fraction of the *visible* axes a point falls at -- updated to
+        # read off VIEW_X_RANGE instead of the full extent's x0/x1.
+        self.view.ax.set_xlim(*VIEW_X_RANGE)
         # That reserved strip is outside the axes' own bounds, so it
         # paints with the *figure's* background, not the axes' CINEMA_BG
         # (set by set_cinematic_mode, called right after this) -- left at
@@ -997,14 +1034,15 @@ class PublicScene(QtWidgets.QWidget):
         matplotlib's own transform/event pipeline (which needs a real
         QMouseEvent delivered to the canvas, and the overlay sits above
         it and would have to give that up first). Instead it uses the
-        two geometric facts PublicScene itself guarantees: `_strip_chrome`
-        always sets the axes to (0,0)-(SCENE_WIDTH_FRAC,1) of the figure,
-        so a widget-fraction position maps to the known physical `extent`
-        directly once rescaled by SCENE_WIDTH_FRAC -- no devicePixelRatio
-        or transform-API version assumptions involved. A tap past
-        SCENE_WIDTH_FRAC lands in the reserved thermometer column, not on
-        the scene, and returns None the same way a tap outside the
-        widget's own bounds already did.
+        geometric facts PublicScene itself guarantees: `_strip_chrome`
+        always sets the axes to (0,0)-(SCENE_WIDTH_FRAC,1) of the figure
+        and crops its visible x-range to VIEW_X_RANGE, so a widget-
+        fraction position maps to a known physical point directly once
+        rescaled by SCENE_WIDTH_FRAC and VIEW_X_RANGE -- no
+        devicePixelRatio or transform-API version assumptions involved.
+        A tap past SCENE_WIDTH_FRAC lands in the reserved thermometer
+        column, not on the scene, and returns None the same way a tap
+        outside the widget's own bounds already did.
         """
         if self._temperature is None or self.view._extent is None:
             return None
@@ -1016,8 +1054,9 @@ class PublicScene(QtWidgets.QWidget):
         frac_y = 1.0 - (widget_pos.y() / height)   # Qt top-left -> plot bottom-left
         if not (0.0 <= frac_x <= 1.0 and 0.0 <= frac_y <= 1.0):
             return None
-        x0, x1, z0, z1 = self.view._extent
-        x = x0 + frac_x * (x1 - x0)
+        _x0, _x1, z0, z1 = self.view._extent
+        view_x0, view_x1 = VIEW_X_RANGE
+        x = view_x0 + frac_x * (view_x1 - view_x0)
         z = z0 + frac_y * (z1 - z0)
         value = self.probe_value_at(x, z)
         if value is None:
