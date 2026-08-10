@@ -218,6 +218,45 @@ TRANSLATIONS = {
               "Was passiert, wenn wir das Feuer verändern?"},
     "candle_burning": {"en": "🔥 That's the candle burning — the flame is where the heat starts!",
                        "de": "🔥 Das ist die brennende Kerze — an der Flamme entsteht die Hitze!"},
+
+    # -- experience.py: Dr. Funke's fact bank (general fire science,
+    # never a claim about this run's own measurements) ------------------
+    "scientist_name": {"en": "Dr. Frieda Funke", "de": "Dr. Frieda Funke"},
+    # Kept short on purpose: Dr. Funke's own thought bubble lives in a
+    # small gutter strip above the thermometer (see PublicOverlay.
+    # _position_thought_bubble), not a full-width caption -- a first,
+    # more sentence-length pass of these overflowed that space in a
+    # real screenshot.
+    "fact_hot_air_rises": {
+        "en": "Hot air rises above cooler air.",
+        "de": "Heiße Luft steigt über kühlerer Luft auf."},
+    "fact_smoke_ceiling_first": {
+        "en": "Smoke spreads along the ceiling first.",
+        "de": "Rauch breitet sich zuerst an der Decke aus."},
+    "fact_fire_triangle": {
+        "en": "Fire needs fuel, oxygen, and heat.",
+        "de": "Feuer braucht Brennstoff, Sauerstoff, Hitze."},
+    "fact_flame_temperature": {
+        "en": "A candle flame can top 1,000°C.",
+        "de": "Eine Kerzenflamme wird über 1.000°C heiß."},
+    "fact_moving_air_oxygen": {
+        "en": "Moving air feeds a flame more oxygen.",
+        "de": "Bewegte Luft gibt der Flamme mehr Sauerstoff."},
+    "fact_cool_air_sinks": {
+        "en": "Cool air sinks and pushes smoke away.",
+        "de": "Kühle Luft sinkt und drängt Rauch weg."},
+    "fact_blue_flame_hottest": {
+        "en": "A flame's blue part is its hottest.",
+        "de": "Der blaue Teil einer Flamme ist am heißesten."},
+    "fact_closed_door_slows_fire": {
+        "en": "A closed door can slow a fire down.",
+        "de": "Eine geschlossene Tür verlangsamt ein Feuer."},
+    "fact_smoke_more_dangerous": {
+        "en": "Smoke is often more dangerous than flames.",
+        "de": "Rauch ist oft gefährlicher als die Flammen."},
+    "fact_firefighters_study_smoke": {
+        "en": "Firefighters study how smoke moves.",
+        "de": "Feuerwehrleute untersuchen, wie Rauch sich bewegt."},
     "celebration_line_1": {"en": "Great job!", "de": "Gut gemacht!"},
     "celebration_line_2": {"en": "You're a Fire Scientist!", "de": "Du bist ein Feuerwissenschaftler!"},
     "celebration_line_3": {"en": "Excellent!", "de": "Ausgezeichnet!"},

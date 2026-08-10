@@ -17,7 +17,8 @@ from PyQt5 import QtCore, QtWidgets
 from public import i18n
 from public import kid_language as kid
 from public.celebration import CelebrationOverlay
-from public.mascot import Mascot, SpeechBubble, IDLE, POINTING, SURPRISED, THINKING
+from public.mascot import (Mascot, SpeechBubble, Scientist, ThoughtBubble,
+                           IDLE, POINTING, SURPRISED, THINKING)
 from public.widgets import (ACCENT, AIRFLOW, DELIGHT, INERT, PANEL_BORDER, TEXT, TEXT_DIM,
                             BigButton, Card, ExploreToggle, MeterChip, StageStrip, Thermometer,
                             TitleBanner)
@@ -232,6 +233,19 @@ class PublicOverlay(QtWidgets.QWidget):
         self.thermometer = Thermometer(self)
         self.thermometer.hide()
 
+        # Dr. Frieda Funke: a second, ambient guide standing in the same
+        # instrument sidebar the thermometer docks in (see Scientist's
+        # own docstring) -- periodically given a real, simplified fire-
+        # science fact by PublicExperience, shown in thought_bubble.
+        # Shares the thermometer's own visibility gating (both are
+        # PublicExperience.set_scientist_visible/set_thermometer_visible,
+        # called together) rather than a second copy of that logic.
+        self.scientist = Scientist(self)
+        self.scientist.setAccessibleName(i18n.tr("scientist_name"))
+        self.scientist.hide()
+        self.thought_bubble = ThoughtBubble(self)
+        self.thought_bubble.hide()
+
         # A small label anchored (left-right) to the real fan/HVAC vent's
         # physical x-position (see PublicScene.vent_marker_position) --
         # makes the fan a thing in the scene, not a settings toggle
@@ -401,12 +415,46 @@ class PublicOverlay(QtWidgets.QWidget):
     def _reposition_thermometer_once_settled(self) -> None:
         if self.thermometer.isVisible():
             self._position_thermometer()
+            self._position_scientist()
+            # The mascot's own speech bubble clamps its width against
+            # self.thermometer.x() (see _position_mascot's own comment),
+            # computed synchronously back in set_thermometer_visible --
+            # before *this* deferred correction ran. If settling moved
+            # the thermometer even a few px, that clamp is now stale and
+            # the bubble can run past the thermometer's real left edge
+            # (a real, measured overlap with Dr. Funke's own spot, which
+            # sits at that same x). Re-flowing it here, against the
+            # now-settled geometry, is what closes that gap.
+            self._position_mascot()
 
     def update_thermometer(self, value_c: float, caption: str) -> None:
         self.thermometer.set_reading(value_c, caption)
 
     def update_thermometer_trail(self, values: list) -> None:
         self.thermometer.set_trail(values)
+
+    # -- Dr. Funke (see Scientist's own docstring) -----------------------
+    def set_scientist_visible(self, visible: bool) -> None:
+        self.scientist.setVisible(visible)
+        if visible:
+            self._position_scientist()
+            self.scientist.raise_()
+        else:
+            self.thought_bubble.set_text("")
+
+    def say_fact(self, text: str) -> None:
+        """Show a fact in Dr. Funke's own thought bubble -- never routed
+        through Mascot/SpeechBubble's say(), which is the primary
+        guide's direct address to the child (see Scientist's own
+        docstring for why the two are kept visually and semantically
+        separate)."""
+        self.thought_bubble.set_text(text)
+        if text:
+            self._position_thought_bubble()
+            self.thought_bubble.raise_()
+
+    def clear_fact(self) -> None:
+        self.thought_bubble.set_text("")
 
     # -- fan/vent marker ----------------------------------------------------
     def set_fan_marker(self, frac, on: bool) -> None:
@@ -663,6 +711,7 @@ class PublicOverlay(QtWidgets.QWidget):
         self.stages.move((self.width() - strip_width) // 2,
                          self.height() - self.stages.height() - 6)
         self._position_thermometer()
+        self._position_scientist()
         self._position_fan_marker()
         self._position_mascot()
 
@@ -755,6 +804,52 @@ class PublicOverlay(QtWidgets.QWidget):
         # winning) operand, the unconverted numpy type reached move()
         # directly and raised.
         self.thermometer.move(int(min(x, self.width() - self.thermometer.width() - 4)), top)
+
+    def _position_scientist(self) -> None:
+        """Dr. Funke stands in the sidebar's lower-right corner, below
+        the thermometer's own bottom edge -- not above it (a first pass
+        put her there, but at a wide dev window that spot sat directly
+        under the meter cards, which grow with the window in a way her
+        fixed offset from exit_button didn't track, and a real
+        screenshot showed her overlapping "Gentle drift"'s own text).
+        Anchoring off the thermometer's geometry instead of the meters
+        avoids that: _position_thermometer already reads the meters'
+        real height to place the thermometer, so anything anchored to
+        the thermometer inherits that same meters-awareness for free.
+        The thermometer is never shrunk to make room for her (Thermometer.
+        _paint_tube has its own hard-coded ~310px floor below which the
+        tube stops painting at all -- a real, screenshotted total loss of
+        the tube, bulb, reading and sparkline the first version of this
+        caused) -- she only ever uses whatever the thermometer leaves
+        below it.
+        """
+        if not self.scientist.isVisible():
+            return
+        x = self.thermometer.x()
+        y = self.thermometer.geometry().bottom() + 8
+        y = min(y, self.height() - self.scientist.height() - 6)
+        self.scientist.move(x, y)
+        self._position_thought_bubble()
+
+    def _position_thought_bubble(self) -> None:
+        """To Dr. Funke's right, in the same lower-right pocket below
+        the thermometer. Side-by-side needs no extra vertical room at
+        all, and staying inside the gutter (right of SCENE_WIDTH_FRAC's
+        own cut) is what keeps it clear of the primary mascot's own
+        speech bubble, which occupies the wider centre-left of the
+        screen for most of OBSERVE."""
+        if not self.thought_bubble.isVisible():
+            return
+        x = self.scientist.geometry().right() + 6
+        y = self.scientist.y()
+        available_w = self.width() - x - 4
+        available_h = max(0, self.height() - y - 6)
+        width = max(150, min(self.thought_bubble.sizeHint().width(), available_w))
+        # fit_to shrinks the font as needed rather than letting a long
+        # (esp. German) fact grow past available_h into the thermometer's
+        # own caption -- see ThoughtBubble.fit_to's own comment.
+        self.thought_bubble.fit_to(width, available_h)
+        self.thought_bubble.move(int(x), y)
 
     def _position_mascot(self) -> None:
         """Pin the mascot bottom-left and the bubble to its right, both
@@ -912,3 +1007,4 @@ class PublicOverlay(QtWidgets.QWidget):
 
     def shutdown(self) -> None:
         self.mascot.stop()
+        self.scientist.stop()

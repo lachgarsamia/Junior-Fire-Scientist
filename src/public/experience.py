@@ -76,6 +76,27 @@ _COUNTDOWN_STEPS = ("3", "2", "1", "🔥")
 PROBE_PHASES = (Phase.OBSERVE, Phase.EXPERIMENT, Phase.REVEAL, Phase.SCIENCE,
                 Phase.GAME_PLAY)
 
+# Dr. Funke's fact bank -- real, general fire-science statements (never
+# a claim about this specific simulation's own measurements, which stay
+# the exclusive job of the honesty-gated PUBLIC_METRICS/kid_language
+# machinery elsewhere). Keys, not literal text, same convention every
+# other translatable content bank in this module already follows.
+FIRE_FACT_KEYS = (
+    "fact_hot_air_rises",
+    "fact_smoke_ceiling_first",
+    "fact_fire_triangle",
+    "fact_flame_temperature",
+    "fact_moving_air_oxygen",
+    "fact_cool_air_sinks",
+    "fact_blue_flame_hottest",
+    "fact_closed_door_slows_fire",
+    "fact_smoke_more_dangerous",
+    "fact_firefighters_study_smoke",
+)
+_FACT_SHOW_MS = 7000
+_FACT_GAP_MS = 15000
+_FACT_FIRST_DELAY_MS = 9000
+
 # Phases where the fan/vent marker (anchored to the real vent position)
 # is worth showing -- the phases where the scene itself, not a card, is
 # what fills the screen.
@@ -199,6 +220,13 @@ class PublicExperience(QtWidgets.QWidget):
         # Phase 7: a one-time nudge after the first candle tap, only while
         # the child hasn't changed anything yet -- see _on_candle_tapped.
         self._candle_nudge_shown = False
+        # Dr. Funke's fact bank, shuffled and drawn down without repeats
+        # until exhausted, then reshuffled -- see _show_next_fact. Not
+        # reset by _restart_narration/scenario switches: unlike the
+        # story beats, a fact isn't *about* the currently-loaded run, so
+        # there's no reason to make a visitor sit through the same one
+        # twice just because they flipped the fan.
+        self._fact_queue: list = []
         self._active = False
         # Set by _play_until(): the frame playback should stop at, and
         # what to run when it gets there. None means "no scheduled stop"
@@ -925,6 +953,14 @@ class PublicExperience(QtWidgets.QWidget):
         # visibility instead, a real bug that put the thermometer at the
         # wrong height (see set_thermometer_visible's docstring).
         self.overlay.set_thermometer_visible(phase in PROBE_PHASES)
+        # Dr. Funke only stands in OBSERVE (see set_scientist_visible's
+        # own docstring for why: the one phase the stage strip is
+        # guaranteed hidden in, which her spot below the thermometer
+        # relies on). Positioned after the thermometer for the same
+        # reason the line above runs here and not earlier.
+        self.overlay.set_scientist_visible(phase is Phase.OBSERVE)
+        if phase is Phase.OBSERVE:
+            self._arm_fact_timer()
         # Re-flow the mascot bubble now that the thermometer's real
         # visibility/position for *this* phase is known. handler() above
         # already called overlay.say() once (most phases open with one),
@@ -1721,14 +1757,22 @@ class PublicExperience(QtWidgets.QWidget):
         return max(OBSERVE_MIN_FRAMES, min(end, last_frame))
 
     def _render_observe(self) -> None:
-        """Explore: the always-available free-play screen. Exactly three
-        things a child can always do here -- tap anywhere to measure,
-        flip Fan/Candles, watch the simulation respond -- and nothing
-        else competes for attention. Every optional activity (the
-        mini-games, comparisons, the guided "Test an idea" journey, the
-        discovery notebook) lives one tap away in Games, entered
-        intentionally via the small button below rather than surfacing
-        here unasked."""
+        """Explore: the always-available free-play screen. Three things
+        a child can always do here -- tap anywhere to measure, flip
+        Fan/Candles, watch the simulation respond. Every optional
+        activity (the mini-games, comparisons, the guided "Test an
+        idea" journey, the discovery notebook) lives one tap away in
+        Games, entered intentionally via the small button below rather
+        than surfacing here unasked.
+
+        Dr. Funke (see PublicOverlay.Scientist -- ambient scoping via
+        _arm_fact_timer, below) is a deliberate, explicitly-requested
+        exception to that "nothing arrives unprompted" rule the rest of
+        this phase still follows: her facts are general fire-science
+        content, not a claim about this run, standing quietly in the
+        instrument sidebar rather than competing with the scene itself
+        for the centre of the screen.
+        """
         self.overlay.set_prompt(self.experiment.observe_prompt)
         self._nudged = False
         self.overlay.set_meters_visible(True)
@@ -1745,6 +1789,34 @@ class PublicExperience(QtWidgets.QWidget):
         self._sync_explore_controls_to_case()
         self._start_free_play()
         self._arm_idle_vent_hint()
+
+    def _arm_fact_timer(self) -> None:
+        """Schedule Dr. Funke's next fact -- a real delay before the
+        first one (_FACT_FIRST_DELAY_MS) so it doesn't fire the instant
+        OBSERVE appears, before a child has looked at anything.
+        _defer_if_current, not a persistent QTimer: the callback simply
+        no-ops if the phase has changed by the time it fires (leaving
+        OBSERVE for a moment and coming back re-arms fresh via
+        _render_phase, rather than this timer needing its own cancel/
+        restart bookkeeping), the same guard _show_next_fact and
+        _hide_fact_and_wait_for_more both rely on too."""
+        self._defer_if_current(_FACT_FIRST_DELAY_MS, self._show_next_fact)
+
+    def _show_next_fact(self) -> None:
+        if self.state.phase is not Phase.OBSERVE:
+            return
+        if not self._fact_queue:
+            self._fact_queue = list(FIRE_FACT_KEYS)
+            random.shuffle(self._fact_queue)
+        key = self._fact_queue.pop()
+        self.overlay.say_fact(tr(key))
+        self._defer_if_current(_FACT_SHOW_MS, self._hide_fact_and_wait_for_more)
+
+    def _hide_fact_and_wait_for_more(self) -> None:
+        if self.state.phase is not Phase.OBSERVE:
+            return
+        self.overlay.clear_fact()
+        self._defer_if_current(_FACT_GAP_MS, self._show_next_fact)
 
     def _on_games_requested(self) -> None:
         self.time_controller.pause()

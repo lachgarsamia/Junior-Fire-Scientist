@@ -5913,4 +5913,175 @@ class TestGamesHub:
         assert experience.overlay.thermometer._caption.text() == caption_after_leaving
 
 
+class TestScientistFactBubble:
+    """Dr. Funke: a second, distinct mascot standing in the instrument
+    sidebar, sharing general fire-science facts on her own ambient
+    timer (never pull-triggered, and never routed through the primary
+    Mascot/SpeechBubble the child talks to directly -- see
+    PublicOverlay.say_fact's own docstring). Geometry here matters more
+    than most: a first version of her sidebar spot shrank the
+    thermometer to make room and silently lost the tube, bulb and
+    readout below a real rendering floor in Thermometer._paint_tube;
+    the fix moved her above the thermometer instead, in the sidebar's
+    otherwise-empty strip between the language toggle and the
+    thermometer's own top edge -- and a follow-up screenshot caught the
+    (longer, compound-word) German facts overlapping that same edge
+    until ThoughtBubble.fit_to started shrinking its own font to
+    guarantee a fit. These tests pin both fixes."""
+
+    @pytest.fixture
+    def experience(self, qapp):
+        sim = load_simulation_data()
+        if sim.is_demo:
+            pytest.skip("real dataset not present")
+        window = MainWindow(sim)
+        window.resize(800, 600)
+        window.show()
+        for _ in range(6):
+            qapp.processEvents()
+        window.enter_public_mode()
+        yield window.public_experience
+        window.close()
+        i18n.set_language("en")
+
+    def test_hidden_outside_observe(self, experience):
+        experience._begin_journey()
+        assert experience.state.phase is Phase.INTRO
+        assert not experience.overlay.scientist.isVisible()
+
+        experience._start_observe()
+        assert experience.overlay.scientist.isVisible()
+
+        experience.state.record_prediction("cooler")
+        experience.state.record_choice("fan_on")
+        experience.state.go_to(Phase.REVEAL)
+        experience._render_phase()
+        assert not experience.overlay.scientist.isVisible()
+
+    def test_leaving_observe_clears_her_bubble(self, experience):
+        experience._begin_journey()
+        experience._start_observe()
+        experience.overlay.say_fact(i18n.tr("fact_fire_triangle"))
+        assert experience.overlay.thought_bubble.text()
+
+        experience.state.go_to(Phase.REVEAL)
+        experience._render_phase()
+        assert experience.overlay.thought_bubble.text() == ""
+
+    def test_thermometer_keeps_its_full_observe_height(self, experience):
+        """The thermometer must never be shrunk to make room for her --
+        that's the exact regression (Thermometer._paint_tube's tube
+        vanishing below ~310px) her sidebar spot was redesigned to
+        avoid."""
+        experience._begin_journey()
+        experience._start_observe()
+        without_her = experience.overlay.thermometer.height()
+
+        experience.overlay.set_scientist_visible(False)
+        assert experience.overlay.thermometer.height() == without_her
+        experience.overlay.set_scientist_visible(True)
+        assert experience.overlay.thermometer.height() == without_her
+
+    @pytest.mark.parametrize("lang", ["en", "de"])
+    def test_every_fact_bubble_clears_the_thermometer_and_screen_bottom(self, experience, lang):
+        """The regression a screenshot actually caught (back when she
+        stood above the thermometer): German's longer compound-word
+        phrasing pushed the bubble past the thermometer's edge. She now
+        stands below the thermometer instead (see _position_scientist's
+        own docstring for why), so the edge that matters flipped --
+        checked here alongside the screen's own bottom edge, the new
+        constraint that spot introduces. Checked for every fact key, not
+        just the longest, since fit_to's shrink-font loop is what has to
+        keep this true regardless of which one a child happens to see."""
+        i18n.set_language(lang)
+        experience._begin_journey()
+        experience._start_observe()
+        for key in experience_mod.FIRE_FACT_KEYS:
+            experience.overlay.say_fact(i18n.tr(key))
+            bubble = experience.overlay.thought_bubble.geometry()
+            thermometer_bottom = experience.overlay.thermometer.geometry().bottom()
+            assert bubble.top() > thermometer_bottom, (lang, key, i18n.tr(key))
+            assert bubble.bottom() <= experience.overlay.height(), (lang, key, i18n.tr(key))
+
+    def test_bubble_sits_beside_her_not_over_the_thermometer(self, experience):
+        experience._begin_journey()
+        experience._start_observe()
+        experience.overlay.say_fact(i18n.tr("fact_cool_air_sinks"))
+        scientist = experience.overlay.scientist.geometry()
+        bubble = experience.overlay.thought_bubble.geometry()
+        thermometer = experience.overlay.thermometer.geometry()
+        assert bubble.left() >= scientist.right()
+        assert not bubble.intersects(thermometer)
+        assert not scientist.intersects(thermometer)
+
+    def test_settling_does_not_leave_the_mascot_bubble_overlapping_her(self, experience, qapp):
+        """The regression a geometry sweep actually caught: set_thermometer_
+        visible positions the thermometer once synchronously, using
+        possibly-stale meter geometry, then corrects it a moment later
+        via a deferred zero-ms timer (_reposition_thermometer_once_
+        settled) once everything has actually settled. The primary
+        mascot's own speech bubble clamps its width against
+        self.thermometer.x() (_position_mascot), computed back when the
+        thermometer visibility was first set -- before that correction
+        ran. When settling moved the thermometer even a few px, the
+        bubble's clamp went stale and it overlapped whatever stands at
+        the thermometer's real x, which is exactly where Dr. Funke
+        stands. Letting the deferred correction's own timer actually
+        fire (via processEvents) is what reproduces it; asserting only
+        right after _start_observe(), before that timer fires, would
+        have missed it entirely."""
+        experience._begin_journey()
+        experience._start_observe()
+        experience.overlay.say_fact(i18n.tr("fact_hot_air_rises"))
+        for _ in range(10):
+            qapp.processEvents()
+        mascot_bubble = experience.overlay.bubble.geometry()
+        scientist = experience.overlay.scientist.geometry()
+        thought_bubble = experience.overlay.thought_bubble.geometry()
+        assert not mascot_bubble.intersects(scientist)
+        assert not mascot_bubble.intersects(thought_bubble)
+
+    @pytest.mark.parametrize("lang", ["en", "de"])
+    def test_bubble_never_runs_past_the_right_edge_of_the_screen(self, experience, lang):
+        """The regression a second screenshot caught: ThoughtBubble's own
+        setMinimumWidth(170) silently overrode _position_thought_bubble's
+        width clamp -- QWidget.resize() snaps back up to a widget's own
+        minimum, so a bubble computed to fit the ~156px-wide sidebar
+        gutter still rendered at 170px and ran 10px off an 800px-wide
+        screen. Checked for every fact key: the clamp has to hold
+        regardless of which one happens to be short enough to hit it."""
+        i18n.set_language(lang)
+        experience._begin_journey()
+        experience._start_observe()
+        for key in experience_mod.FIRE_FACT_KEYS:
+            experience.overlay.say_fact(i18n.tr(key))
+            bubble = experience.overlay.thought_bubble.geometry()
+            assert bubble.right() <= experience.overlay.width(), (lang, key, i18n.tr(key))
+
+    def test_fact_queue_cycles_through_every_key_before_repeating(self, experience):
+        experience._begin_journey()
+        experience._start_observe()
+        seen = set()
+        for _ in range(len(experience_mod.FIRE_FACT_KEYS)):
+            experience._show_next_fact()
+            seen.add(experience.overlay.thought_bubble.text())
+        assert len(seen) == len(experience_mod.FIRE_FACT_KEYS)
+
+    def test_show_next_fact_is_a_noop_once_the_phase_has_moved_on(self, experience):
+        """Mirrors the phase-guard every other deferred OBSERVE-only
+        callback in this module already relies on (_defer_if_current) --
+        a stale timer firing after the child has moved on must not pop
+        a fact onto a screen that no longer shows her at all."""
+        experience._begin_journey()
+        experience._start_observe()
+        experience.state.record_prediction("cooler")
+        experience.state.record_choice("fan_on")
+        experience.state.go_to(Phase.REVEAL)
+        experience._render_phase()
+
+        experience._show_next_fact()
+
+        assert experience.overlay.thought_bubble.text() == ""
+
+
 # ------------------------------------------------------------- manifest
