@@ -21,6 +21,33 @@ BUTTON_MIN_HEIGHT = 66
 BUTTON_MIN_WIDTH = 190
 
 
+def _readable_text_on(bg_hex: str) -> str:
+    """Dark (#1A1005, the checked-button default) or light (TEXT) text,
+    whichever gives at least WCAG AA's 4.5:1 contrast against `bg_hex` --
+    checked-state text is small (11px) and bold, not "large text" by
+    WCAG's own 18pt/14pt-bold definition, so it needs the full small-text
+    floor, not the relaxed 3:1 one. Picked by relative luminance
+    (the same formula WCAG's own contrast ratio is built on), not
+    guessed per color: a hardcoded #1A1005 for every checked color
+    measured at only 3.88:1 against INERT's own grey, a real, computed
+    shortfall this exists to catch for any future checked_colors entry
+    too, not just today's palette."""
+    def _luminance(hex_color: str) -> float:
+        hex_color = hex_color.lstrip("#")
+        r, g, b = (int(hex_color[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+
+        def _lin(c: float) -> float:
+            return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+        r, g, b = _lin(r), _lin(g), _lin(b)
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+    dark, light = "#1A1005", TEXT
+    bg_lum = _luminance(bg_hex)
+    dark_contrast = (max(bg_lum, _luminance(dark)) + 0.05) / (min(bg_lum, _luminance(dark)) + 0.05)
+    light_contrast = (max(bg_lum, _luminance(light)) + 0.05) / (min(bg_lum, _luminance(light)) + 0.05)
+    return dark if dark_contrast >= light_contrast else light
+
+
 def enable_height_for_width(widget) -> None:
     """Let a word-wrapped QLabel actually report its wrapped height.
 
@@ -52,7 +79,14 @@ AIRFLOW = "#7DD3FC"
 # Neutral, hue-less "off/inert" checked state -- paired with AIRFLOW on
 # the fan toggle so OFF never reads as a dimmer version of some other
 # meaning (it isn't cooling, isn't flame-adjacent, it's just off).
-INERT = "#6B7280"
+# #6B7280 -> #4B5563: the original tone paired with dark checked-state
+# text (see ExploreToggle's own _readable_text_on) at 3.88:1 contrast,
+# under WCAG AA's 4.5:1 floor for small text -- measured, not assumed,
+# while checking the whole checked-button palette against that floor.
+# Darkened enough that the same check comfortably clears it with light
+# text instead, without losing the "muted, hue-less" character that
+# distinguishes it from AIRFLOW/ACCENT's own checked colors.
+INERT = "#4B5563"
 
 
 class BigButton(QtWidgets.QPushButton):
@@ -132,7 +166,13 @@ class ExploreToggle(QtWidgets.QWidget):
         self._flash_timer = None
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
+        # 4 -> 10: the header ("Vent 1", "Candles"...) and its own button
+        # row read as nearly touching at 4px -- a real, screenshotted
+        # complaint. 10, not more: explore_panel's own height has no
+        # slack to give (see the button-font comment below), so this is
+        # the most breathing room the caption can get without pushing
+        # the row past that budget.
+        layout.setSpacing(10)
 
         caption = QtWidgets.QLabel(f"{icon} {label}")
         caption.setAlignment(QtCore.Qt.AlignCenter)
@@ -141,29 +181,93 @@ class ExploreToggle(QtWidgets.QWidget):
         layout.addWidget(caption)
 
         row = QtWidgets.QHBoxLayout()
+        # 4 -> 6: a small bump, kept deliberately smaller than the gap
+        # PublicOverlay.set_explore_controls now puts *between* whole
+        # groups (see its own divider/spacing comment) -- within-group
+        # buttons must still read as one cluster the group's own header
+        # names, not as isolated pills the eye has to regroup itself.
         row.setSpacing(6)
         self._group = QtWidgets.QButtonGroup(self)
         self._group.setExclusive(True)
         self._values = []
         for index, option in enumerate(options):
             color = checked_colors[index] if checked_colors else ACCENT
+            checked_text = _readable_text_on(color)
             hover_color = QtGui.QColor(color).lighter(115).name()
+            # A brighter, wider ring than the fill itself -- reads as a
+            # glow around the pressed pill, not just a color swap, so the
+            # active option is unmistakable at a glance rather than
+            # something a visitor has to look closely to notice (direct
+            # feedback: the old 2px-transparent-border checked state was
+            # "too easy to miss", and a follow-up pass found even the
+            # first 3px ring/150%-lighter glow still easy to miss at this
+            # size/density -- bumped once more below). Unchecked buttons
+            # go the other way -- dimmer text (TEXT_DIM, not TEXT) and a
+            # near-invisible border -- so the gap between "this one's
+            # selected" and "this one isn't" is contrast on both ends,
+            # not just a fill color swap in the middle.
+            glow_color = QtGui.QColor(color).lighter(165).name()
+            pressed_color = QtGui.QColor(color).darker(112).name()
             button = QtWidgets.QPushButton(f"{option.icon} {option.label}")
             button.setCheckable(True)
             button.setCursor(QtCore.Qt.PointingHandCursor)
-            button.setMinimumHeight(64)
-            button.setMinimumWidth(88)
+            # 88/64/16px font -> 58/44/12px font: four real controls (Vent
+            # 1/Candles/Vent 2/Door) with Vent 1 now three buttons wide
+            # (open/closed/fan-on, not two) no longer fit one 800x600 row
+            # at the old sizes -- confirmed by an actual screenshot
+            # showing "SHUT"/"NARROW" clipped mid-word. explore_panel's
+            # own *height* has no real slack to give (root's layout is
+            # already at its vertical budget -- a two-row wrap was tried
+            # and reverted, see PublicOverlay's own explore_layout
+            # comment), so the fix has to be width, and the font-size is
+            # what actually shrinks a button's natural (content-driven)
+            # size -- a smaller min-width alone doesn't stop long text
+            # from forcing a wider button regardless of the floor.
+            # min/max-height both pinned to the same 44px (not just a
+            # floor): a min-height alone still lets a button's own
+            # content-driven sizeHint grow past it, and a follow-up pass
+            # found this could very slightly disagree between options
+            # with different emoji glyphs -- pinning the ceiling too is
+            # what makes every button in every group exactly 44px, not
+            # just at-least 44px. min-height is set in the stylesheet
+            # too, not just via the Python call: BigButton's own comment
+            # explains why (setMinimumHeight alone loses to the app-level
+            # QSS's own QPushButton min-height). Fixed identically across
+            # every ExploreToggle instance (Vent 1/Candles/Vent 2/Door
+            # all build from this one shared constructor) -- height,
+            # padding and corner radius were already uniform across
+            # groups before this pass; kept that way, not re-derived per
+            # group, so the four keep reading as one control bar (see
+            # PublicOverlay's own explore_panel background, added for the
+            # same reason).
+            button.setMinimumHeight(44)
+            button.setMaximumHeight(44)
+            button.setMinimumWidth(52)
             button.setStyleSheet(f"""
                 QPushButton {{
-                    background: rgba(24, 30, 42, 235); color: {TEXT};
-                    border: 2px solid {PANEL_BORDER}; border-radius: 14px;
-                    font-size: 16px; font-weight: 600; padding: 6px 12px;
+                    background: rgba(22, 27, 38, 210); color: {TEXT_DIM};
+                    border: 2px solid rgba(255, 255, 255, 24); border-radius: 12px;
+                    font-size: 11px; font-weight: 600; padding: 4px 5px;
+                    min-height: 44px; max-height: 44px;
                 }}
                 QPushButton:checked {{
-                    background: {color}; color: #1A1005; border: 2px solid transparent;
+                    background: {color}; color: {checked_text};
+                    border: 4px solid {glow_color}; font-weight: 800;
+                    padding: 2px 3px;
                 }}
-                QPushButton:hover {{ background: rgba(44, 54, 72, 245); }}
+                QPushButton:hover {{
+                    background: rgba(48, 58, 78, 245); color: {TEXT};
+                    border: 2px solid rgba(255, 255, 255, 70);
+                }}
                 QPushButton:checked:hover {{ background: {hover_color}; }}
+                QPushButton:pressed {{
+                    background: rgba(64, 76, 100, 245);
+                    padding-top: 6px; padding-bottom: 2px;
+                }}
+                QPushButton:checked:pressed {{
+                    background: {pressed_color};
+                    padding-top: 4px; padding-bottom: 0px;
+                }}
                 QPushButton:focus {{ border: 3px solid #FFD166; }}
             """)
             self._group.addButton(button, index)
@@ -422,10 +526,9 @@ class Thermometer(QtWidgets.QWidget):
 
     def _paint_tube(self, painter: QtGui.QPainter) -> None:
         # 34/20 -> 48/28: Design Review §6 -- "reads as a flat HUD chip,
-        # not an instrument" -- room_wall_anchor already docks this
-        # correctly against the room's real wall (verified independently
-        # against PublicExperience._update_markers), so the fix here is
-        # purely more visual weight for the tube/bulb themselves.
+        # not an instrument" -- this widget already docks correctly (see
+        # PublicOverlay._position_stat_group), so the fix here is purely
+        # more visual weight for the tube/bulb themselves.
         tube_w = 48
         bulb_r = 28.0
         top = 132
@@ -504,16 +607,55 @@ class MeterChip(QtWidgets.QFrame):
     for it. Values come from the scene's real measurements; this widget
     only formats them."""
 
-    def __init__(self, caption: str, parent=None):
+    def __init__(self, caption: str, parent=None, flat: bool = False):
+        """`flat`: skip this chip's own background/border, narrow its
+        minimum width, and word-wrap its phrase/value -- for the
+        right-side stat panel (see PublicOverlay.stat_panel), which now
+        groups the language toggle, both meter chips, and the
+        thermometer under one shared PANEL_BG/border so they read as a
+        single connected panel; each chip keeping its own nested border
+        on top of that shared one read as boxes-within-a-box rather than
+        one panel. The narrower width is what actually forced the wrap:
+        at the original 210px-per-chip floor, two side by side plus the
+        thermometer made the whole panel wide enough to visually collide
+        with the explore-control row below it (a real, measured overlap
+        at 800x600, the same class of bug ExploreToggle's own font/
+        padding shrink already exists to avoid for that row).
+
+        The caption is *elided*, not wrapped, at this width -- tried
+        word-wrap here first and reverted: "AIR TEMPERATURE"/
+        "LUFTTEMPERATUR" are single all-caps words/compounds with no
+        space for Qt to break at, so word-wrap fell back to a mid-word
+        character split ("TEMPERATURI" / "E" on the next line), a real,
+        screenshotted result that was harder to read than a plain
+        "AIR TEMP…" -- see resizeEvent/_update_caption_elide. The phrase
+        below it keeps word-wrap: it's genuine multi-word text ("Very
+        strong airflow"), which wraps at real word boundaries at this
+        width instead of needing elision.
+
+        Left False (the original look, single-line, 210px floor) for
+        any other caller, so this stays the same reusable card
+        elsewhere."""
         super().__init__(parent)
-        self.setStyleSheet(f"""
-            QFrame {{
-                background: {PANEL_BG};
-                border: 1px solid {PANEL_BORDER};
-                border-radius: 16px;
-            }}
-        """)
-        self.setMinimumWidth(210)
+        self._flat = flat
+        self._caption_full_text = caption
+        if not flat:
+            self.setStyleSheet(f"""
+                QFrame {{
+                    background: {PANEL_BG};
+                    border: 1px solid {PANEL_BORDER};
+                    border-radius: 16px;
+                }}
+            """)
+        self.setMinimumWidth(210 if not flat else 108)
+        if flat:
+            # See Card's own identical pair of calls (this class'
+            # established precedent for a word-wrapped, height-for-width
+            # panel element) -- both the container and each wrapped label
+            # need this, or the layout sizes from the unwrapped single-
+            # line hint and clips every line past the first.
+            self.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Minimum)
+            enable_height_for_width(self)
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(18, 12, 18, 12)
@@ -525,23 +667,72 @@ class MeterChip(QtWidgets.QFrame):
         layout.addWidget(self._caption)
 
         self._value = QtWidgets.QLabel("—")
-        self._value.setStyleSheet(f"color: {TEXT}; font-size: 30px; font-weight: 700; border: none;")
+        # 30px -> 24px for flat only: at _METER_CHIP_FLAT_WIDTH (130,
+        # PublicOverlay's own constant), the widest real reading this
+        # dataset produces ("0.00 m/s"/similar) measured wider than this
+        # chip's own content width at 30px -- clipped, a real,
+        # screenshotted regression. word-wrap is still on underneath
+        # this (belt-and-braces for a reading longer than even 24px
+        # comfortably fits), but the smaller size is what keeps every
+        # normal reading on one line instead of wrapping every time.
+        value_size = "24px" if flat else "30px"
+        self._value.setStyleSheet(f"color: {TEXT}; font-size: {value_size}; "
+                                  "font-weight: 700; border: none;")
+        if flat:
+            self._value.setWordWrap(True)
+            enable_height_for_width(self._value)
         layout.addWidget(self._value)
 
         self._phrase = QtWidgets.QLabel("")
         self._phrase.setStyleSheet(f"color: {ACCENT}; font-size: 16px; font-weight: 600; border: none;")
+        if flat:
+            self._phrase.setWordWrap(True)
+            enable_height_for_width(self._phrase)
         layout.addWidget(self._phrase)
+        if flat:
+            self._update_caption_elide()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self._flat:
+            self._update_caption_elide()
+
+    def _update_caption_elide(self) -> None:
+        """Re-elide the caption to this chip's own current width --
+        called on every resize (this chip's width is decided by its
+        caller, PublicOverlay._position_stat_group, not fixed at
+        construction) so a narrower re-layout never leaves last resize's
+        longer elided text overflowing.
+
+        Computed from self.width() minus the layout's own known left/
+        right margins (18 each, set in __init__), not self._caption.
+        width(): the caption QLabel's own post-layout width isn't
+        reliably current the instant resizeEvent fires -- Qt can defer a
+        child layout's own relayout by one event-loop turn past the
+        parent's resize, the same staleness PublicOverlay.
+        set_thermometer_visible's own comment already documents for a
+        different widget -- so reading it here would elide against
+        last frame's width, not this one's."""
+        available = max(0, self.width() - 36)
+        metrics = QtGui.QFontMetrics(self._caption.font())
+        elided = metrics.elidedText(
+            self._caption_full_text, QtCore.Qt.ElideRight, available)
+        self._caption.setText(elided)
 
     def set_reading(self, value_text: str, phrase: str, icon: str = "") -> None:
         self._value.setText(f"{icon} {value_text}".strip())
         self._phrase.setText(phrase)
-        self.setAccessibleDescription(f"{self._caption.text()}: {value_text}, {phrase}")
+        self.setAccessibleDescription(f"{self._caption_full_text}: {value_text}, {phrase}")
 
     def set_caption(self, caption: str) -> None:
         """Re-set the caption after construction -- the language toggle's
         only route to updating this one label, which set_reading() never
         touches (see PublicExperience._on_language_requested)."""
-        self._caption.setText(caption)
+        self._caption_full_text = caption
+        if self._flat:
+            self._update_caption_elide()
+        else:
+            self._caption.setText(caption)
 
 
 class Card(QtWidgets.QFrame):
@@ -614,7 +805,7 @@ class StageStrip(QtWidgets.QWidget):
     path" shape, closer to a map or a checkout progress bar than a menu.
     """
 
-    STAGES = (("👀", "WATCH"), ("🤔", "GUESS"), ("🔥", "TEST"), ("🔎", "DISCOVER"))
+    STAGES = (("👀", "WATCH"), ("🤔", "GUESS"), ("🧪", "TEST"), ("🔎", "DISCOVER"))
 
     def __init__(self, parent=None):
         super().__init__(parent)

@@ -51,7 +51,7 @@ class HomePage(Page):
         # Public mode entry. Sits beside the researcher CTA rather than
         # in the nav rail, because it swaps out the whole shell (see
         # MainWindow.enter_public_mode) instead of switching pages.
-        self.public_button = QtWidgets.QPushButton("🔥  Fire Explorer (public)")
+        self.public_button = QtWidgets.QPushButton("🕯️  Fire Explorer (public)")
         self.public_button.setFixedWidth(260)
         self.public_button.setToolTip(
             "Open the visitor-facing Fire Explorer. Leave it with Ctrl+Shift+R.")

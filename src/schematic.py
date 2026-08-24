@@ -151,19 +151,12 @@ def _flame_shape(cx: float, base_y: float, h: float) -> QtGui.QPainterPath:
 
 
 def draw_realistic_flame(painter: QtGui.QPainter, cx: float, base_y: float, height: float):
-    """Layered candle flame sitting on the floor at (cx, base_y): a soft
-    radial glow, a deep-red outer body, an orange mid, and a bright yellow
-    core -- a warmer, more flame-like look than a single flat teardrop."""
+    """Layered candle flame sitting on the floor at (cx, base_y): a
+    deep-red outer body, an orange mid, and a bright yellow core -- a
+    warmer, more flame-like look than a single flat teardrop. No glow/
+    halo behind it (see git history for the removed one) -- just the
+    flame shape itself."""
     painter.setPen(QtCore.Qt.NoPen)
-    # glow
-    glow_c = QtCore.QPointF(cx, base_y - height * 0.5)
-    glow_r = height * 1.0
-    grad = QtGui.QRadialGradient(glow_c, glow_r)
-    warm = QtGui.QColor("#FF7A18")
-    warm.setAlpha(80); grad.setColorAt(0.0, warm)
-    edge = QtGui.QColor("#FF7A18"); edge.setAlpha(0); grad.setColorAt(1.0, edge)
-    painter.setBrush(QtGui.QBrush(grad))
-    painter.drawEllipse(glow_c, glow_r, glow_r)
     # body layers, outer -> core
     for h, color, lift in ((height, "#D93415", 0.0),
                            (height * 0.70, "#FF8A1E", 0.06),

@@ -40,7 +40,7 @@ _TEMPERATURE_BANDS = (
     (90.0, "temp_band_warm_air", "😅"),
     (200.0, "temp_band_hot", "🥵"),
     (400.0, "temp_band_very_hot", "🌋"),
-    (float("inf"), "temp_band_flame", "🔥"),
+    (float("inf"), "temp_band_flame", "🕯️"),
 )
 
 # Air-speed bands, m/s. Boundaries are placed in the *gap* between the
@@ -165,7 +165,7 @@ _HEAT_GUESS_REACTION_KEYS = (
 
 
 def heat_guess_reaction(temp_c: float) -> str:
-    """"🧊 Cool!" up to "🔥 WOW!" for a guessed location's real measured
+    """"🧊 Cool!" up to "🕯️ WOW!" for a guessed location's real measured
     temperature -- reuses _TEMPERATURE_BANDS' own boundaries so this can
     never drift from the thermometer's own bands."""
     for (threshold, _key, icon), text_key in zip(_TEMPERATURE_BANDS, _HEAT_GUESS_REACTION_KEYS):

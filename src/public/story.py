@@ -80,7 +80,7 @@ class Beat:
 # literal English string would freeze it in whatever language was active
 # at prewarm time. Callers must tr() these keys at display time instead.
 _BEAT_RULES = (
-    ("Ignition", "beat_ignition_text", "🔥", CURIOUS, "beat_ignition_reaction"),
+    ("Ignition", "beat_ignition_text", "🕯️", CURIOUS, "beat_ignition_reaction"),
     ("Fastest heating", "beat_fastest_heating_text", "📈", EXCITED,
      "beat_fastest_heating_reaction"),
     ("Peak", "beat_peak_text", "🌡️", EXCITED, "beat_peak_reaction"),

@@ -12,14 +12,18 @@ The overlay owns no state. PublicExperience drives it phase by phase.
 
 from __future__ import annotations
 
+import sys
+import time
+import traceback
+
 from PyQt5 import QtCore, QtWidgets
 
 from public import i18n
 from public import kid_language as kid
 from public.celebration import CelebrationOverlay
-from public.mascot import (Mascot, SpeechBubble, Scientist, ThoughtBubble,
+from public.mascot import (Mascot, SpeechBubble, Scientist,
                            IDLE, POINTING, SURPRISED, THINKING)
-from public.widgets import (ACCENT, AIRFLOW, DELIGHT, INERT, PANEL_BORDER, TEXT, TEXT_DIM,
+from public.widgets import (ACCENT, AIRFLOW, DELIGHT, INERT, PANEL_BG, PANEL_BORDER, TEXT,
                             BigButton, Card, ExploreToggle, MeterChip, StageStrip, Thermometer,
                             TitleBanner)
 
@@ -61,78 +65,181 @@ class PublicOverlay(QtWidgets.QWidget):
         self._probe_enabled = False
         self._dragging = False
         self._explore_toggles: dict = {}
-        self._fan_marker_frac = None
-        self._thermometer_anchor_frac = None
         self._thermometer_reposition_timer = None
+        # 0.0, not time.monotonic(): monotonic's own reference point is
+        # already far in the past (often system boot), so this reads as
+        # "long ago" from the very first seconds_since_say() call without
+        # needing a sentinel.
+        self._last_say_at = 0.0
+        # TEMPORARY -- crash investigation instrumentation, see say()'s
+        # own comment.
+        self._say_depth = 0
 
         root = QtWidgets.QVBoxLayout(self)
         # Bottom margin reserves the band the mascot and its speech
         # bubble occupy -- they are positioned absolutely (see
         # _position_mascot) rather than laid out, so that a tall card is
         # never squeezed to nothing to make room for decoration. The
-        # right margin reserves the always-visible, absolutely-positioned
-        # exit/language-toggle cluster in resizeEvent() (exit_button +
-        # lang_de_button + lang_en_button, ~154 px wide from the window
-        # edge) -- without it the airflow meter chip's laid-out width
-        # extends underneath those floating buttons and gets visually
-        # clipped by them, a real overlap at 800x600.
-        root.setContentsMargins(40, 28, 170, 160)
+        # right margin reserves stat_panel (language toggle + both
+        # meters + thermometer, see its own construction comment below)
+        # -- also absolutely positioned, not laid out -- so every row
+        # `root` actually manages (the banner, explore_panel, nav_row,
+        # button_holder) stops short of it instead of running underneath
+        # and getting visually clipped. 330, not a smaller value close
+        # to the old 170: stat_panel is wider than the thermometer alone
+        # now that the two meter chips sit beside it (see
+        # _METER_CHIP_FLAT_WIDTH's own comment) -- a first version of
+        # this panel used MeterChip's un-flat 210px-per-chip floor and
+        # needed a 440px margin, which starved the explore-control row
+        # below it to an illegible ~320px at 800x600, a real,
+        # screenshotted regression the narrower flat chip width (plus
+        # MeterChip's own caption-eliding resizeEvent) exists to fix.
+        # 300 -> 330: even after the flat-chip fix, explore_panel's own
+        # right edge (this margin's real boundary) and stat_panel's own
+        # left edge (see _position_stat_group's fixed right-dock) landed
+        # only ~3px apart -- technically not overlapping, but a real,
+        # measured "about to collide" tightness at every window width,
+        # not the visible breathing room asked for. The extra 30px is
+        # spent entirely on that gap, not on stat_panel itself (whose
+        # own width and right-edge inset are unchanged).
+        root.setContentsMargins(40, 28, 330, 160)
         root.setSpacing(16)
 
-        # --- top row: prompt banner + meters ---------------------------
-        top = QtWidgets.QHBoxLayout()
-        top.setSpacing(16)
+        # --- top row: prompt banner -------------------------------------
+        # The meter chips used to sit in this same row, to the banner's
+        # right -- moved out (see stat_panel below) so they can join the
+        # language toggle and the thermometer in one connected panel
+        # instead of floating here as their own separate element.
         self.banner = TitleBanner()
-        top.addWidget(self.banner, 1)
+        root.addWidget(self.banner)
 
-        self.temperature_meter = MeterChip(i18n.tr("meter_temperature_caption"))
-        self.airflow_meter = MeterChip(i18n.tr("meter_airflow_caption"))
-        top.addWidget(self.temperature_meter)
-        top.addWidget(self.airflow_meter)
-        root.addLayout(top)
+        # --- stat panel: language toggle + both meters + thermometer,
+        # grouped into one visually connected right-side panel instead of
+        # three separately-floating elements (a real, repeated complaint
+        # -- "these should read as one panel"). stat_panel itself is
+        # nothing but the shared background/border behind them: the
+        # three groups of widgets it backs are never reparented into it
+        # (still direct children of this overlay, same as before), so
+        # every existing reader of their own geometry in *this* widget's
+        # coordinate space -- the scientist bubble's thermometer-column
+        # clamp, the worker mascot's thermometer-bottom safety net --
+        # keeps working unmodified; only _position_stat_group (replacing
+        # the old _position_thermometer) changes, laying out all three
+        # groups together and sizing this panel to wrap them. Same
+        # PANEL_BG/PANEL_BORDER treatment explore_panel already uses, so
+        # this reads as "the same kind of panel" as the rest of the
+        # app's chrome. Constructed here, before the widgets it backs, so
+        # it paints behind them by plain z-order (no explicit raise_()
+        # needed on this side; each of the three still calls raise_() at
+        # the points it always did, e.g. set_thermometer_visible).
+        self.stat_panel = QtWidgets.QWidget(self)
+        self.stat_panel.setObjectName("statPanel")
+        self.stat_panel.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+        self.stat_panel.setStyleSheet(f"""
+            QWidget#statPanel {{
+                background: {PANEL_BG};
+                border: 1px solid {PANEL_BORDER};
+                border-radius: 16px;
+            }}
+        """)
 
-        # --- fan/vent marker row: a real, laid-out slot (not an
-        # absolutely-positioned float) so it can never overlap the meters
-        # above or the explore toggles/button row below regardless of
-        # phase -- those overlaps were real and reproducible at 800x600
-        # when this was purely coordinate math against the vent's exact
-        # (and sometimes cramped) physical position. Horizontal position
-        # within the row still comes from the real vent geometry (see
-        # PublicScene.vent_marker_position) -- only the vertical slot is
-        # fixed.
-        self.fan_row = QtWidgets.QWidget()
-        self.fan_row.setFixedHeight(34)
-        self.fan_row.setStyleSheet("background: transparent;")
-        self.fan_row.hide()
-        root.addWidget(self.fan_row)
+        self.temperature_meter = MeterChip(i18n.tr("meter_temperature_caption"), self, flat=True)
+        self.airflow_meter = MeterChip(i18n.tr("meter_airflow_caption"), self, flat=True)
 
         # --- explore row: real, data-driven direct-manipulation controls
         # Wrapped in its own widget (not just a layout) so it can be
         # hidden as a unit outside the free-play window -- shown only
         # while OBSERVE is active (see PublicExperience._render_observe).
         self.explore_panel = QtWidgets.QWidget()
-        # A plain QWidget paints its own opaque background by default,
-        # which showed up as a hard black bar across the whole width --
+        self.explore_panel.setObjectName("explorePanel")
+        # A bare QWidget needs WA_StyledBackground for its own QSS
+        # background/border to actually paint (otherwise Qt falls back to
+        # the app-wide QPushButton/QWidget defaults, which showed up as a
+        # hard black bar across the whole width before this was set --
         # everywhere else on this screen is the translucent overlay over
-        # the fire, so this one row must not be a solid rectangle.
-        self.explore_panel.setStyleSheet("background: transparent;")
+        # the fire). Scoped by #explorePanel, not a bare `QWidget { ... }`
+        # selector, so this background doesn't cascade onto the toggle
+        # buttons/captions inside it -- Qt stylesheets apply an
+        # unqualified QWidget rule to every descendant QWidget too.
+        # One shared translucent panel behind all four toggle groups
+        # (Vent 1/Candles/Vent 2/Door) so they read as sections of one
+        # control bar rather than four separately-floating clusters --
+        # per direct feedback that the row didn't feel unified. Same
+        # PANEL_BG/PANEL_BORDER treatment Card already uses elsewhere,
+        # so this reads as "the same kind of panel" as the rest of the
+        # app's chrome, not a new visual language.
+        self.explore_panel.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+        self.explore_panel.setStyleSheet(f"""
+            QWidget#explorePanel {{
+                background: {PANEL_BG};
+                border: 1px solid {PANEL_BORDER};
+                border-radius: 16px;
+            }}
+        """)
+        # A 2-row grid was tried here and reverted: explore_panel's own
+        # *height* in root's layout is hard-capped at ~91px (root's total
+        # content already exceeds the 800x600 window's vertical budget by
+        # about that much, and every other row -- nav_row,
+        # button_holder -- is pinned/fixed, so a flexible two-row grid
+        # simply gets compressed below any button's real minimum,
+        # confirmed by measuring root's own children, not assumed). A
+        # single row has no such problem (it always fit in that same
+        # ~91px, before and after this change) -- only *width* is tight
+        # now that Vent 1 has three buttons and Door is a fourth group,
+        # so this stays a QHBoxLayout and the fix is in ExploreToggle's
+        # own button/spacing sizes below, the same kind of squeeze this
+        # spacing constant's own history already went through once
+        # (20 -> 12px, for three groups; now tighter again, for four).
+        # Small horizontal/vertical margins (was 0,0,0,0) give the new
+        # shared panel background some breathing room around the
+        # buttons rather than painting flush against them -- kept small
+        # deliberately, the width budget this comment already describes
+        # has no slack to give up to padding.
         explore_layout = QtWidgets.QHBoxLayout(self.explore_panel)
-        explore_layout.setContentsMargins(0, 0, 0, 0)
-        # 20 -> 12: fit a third group (the vent2 control) at 800x600
-        # without any group's buttons shrinking below their own text --
-        # two groups had slack to spare, three did not (caught in an
-        # 800x600 screenshot: "OPEN"/"SHUT" clipped to "OPE"/"SHU" at 20).
-        explore_layout.setSpacing(12)
-        explore_layout.addStretch(1)
+        explore_layout.setContentsMargins(10, 6, 10, 6)
+        # This spacing applies between *every* adjacent pair of items in
+        # the row, dividers (see _make_group_divider) included -- a
+        # divider's own 2px width plus this 6px gap on each side of it
+        # gives ~14px of visual separation between groups, clearly more
+        # than the 6px ExploreToggle's own row.setSpacing uses *within*
+        # a group, so the eye reads "Vent 1 | Candles | Vent 2 | Door" as
+        # four distinct clusters rather than one continuous row (a real
+        # complaint: at the old, roughly-equal within/between spacing,
+        # it read as one row of loose buttons).
+        explore_layout.setSpacing(6)
         self._explore_layout = explore_layout
-        # Toggles are inserted at this index (see set_explore_controls),
-        # which starts at 0 -- *before* the stretch just added -- and
-        # advances by one per toggle, so each new toggle lands to the
-        # right of the previous one but always still left of the stretch,
-        # keeping the row left-aligned regardless of insertion order.
+        # Toggles (and the dividers between them) are appended at this
+        # index (see set_explore_controls), which starts at 0 and
+        # advances by one per widget, so each new one lands to the right
+        # of the previous.
         self._explore_insert_index = 0
+        self._explore_dividers: list = []
         self.explore_panel.hide()
-        root.addWidget(self.explore_panel)
+        # AlignLeft, not a bare addWidget: a QVBoxLayout stretches a
+        # plain child to the *layout's* full available width regardless
+        # of the widget's own sizePolicy, which left this panel's own
+        # background/border stretching well past its actual buttons into
+        # a large stretch of empty painted panel (the old internal
+        # addStretch(1) this replaced was pushing the *buttons* left
+        # within that same over-wide box, not shrinking the box itself)
+        # -- a real, screenshotted "the bar looks like it's enveloping
+        # empty space, not just the buttons" complaint. The alignment
+        # flag instead sizes explore_panel to its own sizeHint (i.e. to
+        # its real content) and left-aligns *that*, so the painted panel
+        # itself now ends where the last button/divider does.
+        #
+        # The alignment flag alone measurably was *not* enough on its
+        # own (still stretched full-width in practice) -- QWidget's
+        # default horizontal size policy is Preferred, which still lets
+        # a QVBoxLayout hand it more than its sizeHint whenever more is
+        # available. Maximum pins the *ceiling* at sizeHint's own width
+        # (it can still shrink below that if the window is narrower, the
+        # same "gets compressed toward each button's own 52px floor"
+        # behaviour already established at 800x600), which is what
+        # actually makes the alignment flag's left-alignment bind.
+        self.explore_panel.setSizePolicy(
+            QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Fixed)
+        root.addWidget(self.explore_panel, 0, QtCore.Qt.AlignLeft)
 
         # --- nav row: slim rows of small pills for navigation-only
         # actions (Explore's "Games" entry, and each Games screen's own
@@ -200,13 +307,24 @@ class PublicOverlay(QtWidgets.QWidget):
 
         root.addStretch(1)
 
-        # --- mascot + speech bubble: absolutely positioned, bottom-left
-        # Deliberately outside the layout. As layout items they competed
-        # with the card for vertical space, and on a short window the
-        # card (whose wrapped labels can shrink to one line) lost and
-        # vanished entirely.
+        # --- mascot + speech bubble: absolutely positioned, bottom-right
+        # (swapped with Dr. Funke -- see her own construction comment
+        # below for why: her old bottom-right spot risked crowding the
+        # experiment/room area as she grew, and the worker mascot's own
+        # tight-corner bubble treatment -- min_width/tail_side/h_padding
+        # below -- is exactly what her bubble used to need in that same
+        # corner). Deliberately outside the layout. As layout items they
+        # competed with the card for vertical space, and on a short
+        # window the card (whose wrapped labels can shrink to one line)
+        # lost and vanished entirely.
         self.mascot = Mascot(self)
-        self.bubble = SpeechBubble(self)
+        # tail_side="right": he now stands in the true bottom-right
+        # corner (see _position_mascot), with the bubble to his *left* --
+        # mirrors Dr. Funke's own old tight-corner treatment exactly
+        # (min_width/h_padding included), since he now occupies the same
+        # physical pocket next to the thermometer's own sidebar column
+        # that she used to.
+        self.bubble = SpeechBubble(self, min_width=130, tail_side="right", h_padding=12)
         self.bubble.hide()
 
         # Stage strip: a "where am I" cue, positioned absolutely at the
@@ -233,30 +351,36 @@ class PublicOverlay(QtWidgets.QWidget):
         self.thermometer = Thermometer(self)
         self.thermometer.hide()
 
-        # Dr. Frieda Funke: a second, ambient guide standing in the same
-        # instrument sidebar the thermometer docks in (see Scientist's
-        # own docstring) -- periodically given a real, simplified fire-
-        # science fact by PublicExperience, shown in thought_bubble.
-        # Shares the thermometer's own visibility gating (both are
+        # Dr. Frieda Funke: a second, ambient guide, now standing in the
+        # true bottom-left corner (see Scientist's own docstring) --
+        # periodically given a real, simplified fire-science fact by
+        # PublicExperience, shown in scientist_bubble. Swapped out of her
+        # old bottom-right spot (next to the thermometer's instrument
+        # sidebar) per direct feedback that the corner risked crowding
+        # the experiment/room area as she grew to full size -- the
+        # worker mascot now occupies that pocket instead (see his own
+        # construction comment above), and she takes his old spot, with
+        # the same generous, un-cramped bubble treatment he used to get
+        # there (min_width/h_padding below both revert to SpeechBubble's
+        # own defaults). A second SpeechBubble instance, the same widget
+        # the primary mascot uses (not a separate bubble class). Shares
+        # the thermometer's own visibility gating (both are
         # PublicExperience.set_scientist_visible/set_thermometer_visible,
         # called together) rather than a second copy of that logic.
         self.scientist = Scientist(self)
         self.scientist.setAccessibleName(i18n.tr("scientist_name"))
         self.scientist.hide()
-        self.thought_bubble = ThoughtBubble(self)
-        self.thought_bubble.hide()
-
-        # A small label anchored (left-right) to the real fan/HVAC vent's
-        # physical x-position (see PublicScene.vent_marker_position) --
-        # makes the fan a thing in the scene, not a settings toggle
-        # floating in a control panel. Child of fan_row (not the overlay
-        # directly), so its vertical slot is guaranteed clear by layout
-        # rather than by coordinate math against whatever else the
-        # current phase happens to show.
-        self.fan_marker = QtWidgets.QLabel("", self.fan_row)
-        self.fan_marker.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
-        self.fan_marker.setAlignment(QtCore.Qt.AlignCenter)
-        self.fan_marker.hide()
+        # "#7C93A8": Scientist's own _SCI_COLLAR -- the one cool colour
+        # in her own palette -- so her bubble reads as visually hers at
+        # a glance (a tinted border/background, see SpeechBubble's own
+        # accent handling) without forking the widget for it, regardless
+        # of which corner she happens to stand in. tail_side left at its
+        # default ("left"): she now stands in the true bottom-left
+        # corner (see _position_scientist), with the bubble to her
+        # *right* -- the same orientation the primary mascot's own
+        # bubble always used in that corner.
+        self.scientist_bubble = SpeechBubble(self, accent="#7C93A8")
+        self.scientist_bubble.hide()
 
         # Exit affordance: small, dim, and out of the way. Deliberately
         # not labelled "Quit" -- it returns to the researcher app, and a
@@ -381,16 +505,16 @@ class PublicOverlay(QtWidgets.QWidget):
         if visible:
             # A phase change (e.g. meters hiding for REVEAL) doesn't fire
             # resizeEvent, so its position needs a manual refresh here to
-            # stay collision-free -- see _position_thermometer.
-            self._position_thermometer()
+            # stay collision-free -- see _position_stat_group.
+            self._position_stat_group()
             self.thermometer.raise_()
             # The meter chips' own sizeHint-driven geometry (read by
-            # _position_thermometer's `top`) isn't always final the
+            # _position_stat_group's `top`) isn't always final the
             # instant set_meters_visible() returns -- Qt can defer a
             # child layout's own relayout by one event-loop turn past
             # the parent's activate(). Caught as a real, measured bug:
             # this call's own `top` used a stale (larger) meter-bottom
-            # value, which _position_thermometer's height formula then
+            # value, which _position_stat_group's height formula then
             # read as "less room available" than genuinely exists,
             # capping the thermometer shorter than it needed to be. One
             # deferred re-run corrects it once everything has settled;
@@ -414,18 +538,20 @@ class PublicOverlay(QtWidgets.QWidget):
 
     def _reposition_thermometer_once_settled(self) -> None:
         if self.thermometer.isVisible():
-            self._position_thermometer()
-            self._position_scientist()
-            # The mascot's own speech bubble clamps its width against
-            # self.thermometer.x() (see _position_mascot's own comment),
-            # computed synchronously back in set_thermometer_visible --
-            # before *this* deferred correction ran. If settling moved
-            # the thermometer even a few px, that clamp is now stale and
-            # the bubble can run past the thermometer's real left edge
-            # (a real, measured overlap with Dr. Funke's own spot, which
-            # sits at that same x). Re-flowing it here, against the
-            # now-settled geometry, is what closes that gap.
+            self._position_stat_group()
             self._position_mascot()
+            # Dr. Funke's own speech bubble clamps its width against
+            # self.thermometer.x() (see _position_scientist_bubble's own
+            # comment), computed synchronously back in
+            # set_thermometer_visible -- before *this* deferred
+            # correction ran. If settling moved the thermometer even a
+            # few px, that clamp is now stale and the bubble can run
+            # past the thermometer's real left edge (a real, measured
+            # overlap with whichever mascot stands in that corner --
+            # the worker mascot's own spot since the corner swap, see
+            # __init__'s own note). Re-flowing it here, against the
+            # now-settled geometry, is what closes that gap.
+            self._position_scientist()
 
     def update_thermometer(self, value_c: float, caption: str) -> None:
         self.thermometer.set_reading(value_c, caption)
@@ -440,91 +566,24 @@ class PublicOverlay(QtWidgets.QWidget):
             self._position_scientist()
             self.scientist.raise_()
         else:
-            self.thought_bubble.set_text("")
+            self.scientist_bubble.set_text("")
 
     def say_fact(self, text: str) -> None:
-        """Show a fact in Dr. Funke's own thought bubble -- never routed
-        through Mascot/SpeechBubble's say(), which is the primary
-        guide's direct address to the child (see Scientist's own
-        docstring for why the two are kept visually and semantically
-        separate)."""
-        self.thought_bubble.set_text(text)
+        """Show a fact in Dr. Funke's own speech bubble -- a second
+        SpeechBubble instance (see its own docstring), not routed
+        through the primary Mascot's say(), which is the primary guide's
+        direct address to the child (see Scientist's own docstring for
+        why the two are kept visually and semantically separate, and
+        PublicExperience._show_next_fact for why they're also kept
+        temporally separate -- deferred whenever the primary guide has
+        spoken recently, so the two are never both up at once)."""
+        self.scientist_bubble.set_text(text)
         if text:
-            self._position_thought_bubble()
-            self.thought_bubble.raise_()
+            self._position_scientist_bubble()
+            self.scientist_bubble.raise_()
 
     def clear_fact(self) -> None:
-        self.thought_bubble.set_text("")
-
-    # -- fan/vent marker ----------------------------------------------------
-    def set_fan_marker(self, frac, on: bool) -> None:
-        """Show the fan label in its dedicated row (fan_row), positioned
-        left-right by `frac`'s x-fraction -- the real vent's own
-        horizontal position -- or hide it when `frac` is None (this
-        phase, this plane, or this study has nothing to anchor it to).
-        Only the x-fraction is used: the row itself is laid out (see
-        __init__), so the vertical position is already guaranteed clear
-        of the meters/explore toggles/button row, rather than following
-        the vent's exact (and sometimes cramped) physical height.
-        """
-        if frac is None:
-            self._fan_marker_frac = None
-            self.fan_marker.hide()
-            self._update_fan_row_visibility()
-            return
-        self._fan_marker_frac = frac
-        self.fan_marker.setText("🌬️  FAN ON" if on else "🚫  FAN OFF")
-        self.fan_marker.setStyleSheet(
-            f"background: {AIRFLOW if on else 'rgba(24, 30, 42, 220)'}; "
-            f"color: {'#1A1005' if on else TEXT_DIM}; font-size: 13px; font-weight: 700;"
-            "border-radius: 10px; padding: 4px 10px;")
-        self.fan_marker.adjustSize()
-        self._update_fan_row_visibility()
-        self._position_fan_marker()
-        self.fan_marker.show()
-        self.fan_marker.raise_()
-
-    def _position_fan_marker(self) -> None:
-        """`frac`'s x is a fraction of the *scene's* full-bleed width
-        (the overlay's own width -- see PublicScene.widget_fraction_for),
-        but fan_marker is now a child of fan_row, which sits inset by the
-        root layout's side margins -- converted back to fan_row's local
-        coordinate space here rather than assuming the two line up."""
-        if self._fan_marker_frac is None or self.fan_row.width() <= 0:
-            return
-        fx, _fy = self._fan_marker_frac
-        x = int(fx * self.width() - self.fan_row.x() - self.fan_marker.width() / 2)
-        y = (self.fan_row.height() - self.fan_marker.height()) // 2
-        x = max(4, min(x, self.fan_row.width() - self.fan_marker.width() - 4))
-        self.fan_marker.move(x, max(0, y))
-
-    def _update_fan_row_visibility(self) -> None:
-        """fan_row holds fan_marker alone now (the candle-count marker
-        that used to share it was removed -- the count is already legible
-        both in the scene itself, drawn candle-by-candle, and in the
-        Candles toggle's own checked state, so a third copy of the same
-        fact was crowding this corner of the screen for nothing new)."""
-        self.fan_row.setVisible(self._fan_marker_frac is not None)
-
-    def pulse_fan_marker(self) -> None:
-        """A brief bounce on the fan/vent marker -- the vent's own "I
-        felt that" acknowledgement for a direct tap in the scene (see
-        PublicExperience._on_vent_tapped), the same idea as the candle's
-        pulse_flame(). Captures the marker's geometry *now* (after the
-        real toggle has already repositioned/relabelled it), not before,
-        so the animation's own end state can never fight with
-        _position_fan_marker's already-correct placement."""
-        if self.fan_marker.isHidden():
-            return
-        original = self.fan_marker.geometry()
-        grown = original.adjusted(-3, -2, 3, 2)
-        anim = QtCore.QPropertyAnimation(self.fan_marker, b"geometry", self)
-        anim.setDuration(260)
-        anim.setKeyValueAt(0.0, original)
-        anim.setKeyValueAt(0.4, grown)
-        anim.setKeyValueAt(1.0, original)
-        anim.setEasingCurve(QtCore.QEasingCurve.OutQuad)
-        anim.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
+        self.scientist_bubble.set_text("")
 
     def pulse_explore_toggle(self, key: str) -> None:
         """See ExploreToggle.flash_highlight -- called right after a
@@ -537,20 +596,58 @@ class PublicOverlay(QtWidgets.QWidget):
 
 
     # -- explore controls (direct manipulation, see experiments.py) -----
+    def _make_group_divider(self) -> QtWidgets.QFrame:
+        """A thin, subtle vertical hairline between two control groups
+        (see set_explore_controls) -- stretches to the full height of
+        its row siblings (a toggle's own caption-plus-buttons column),
+        not just the button row, so it separates "everything about Vent
+        1" from "everything about Candles" rather than just the buttons.
+        PANEL_BORDER, the same faint white this bar's own outer border
+        already uses, so it reads as "part of this panel's own visual
+        language" rather than a new, competing line style."""
+        line = QtWidgets.QFrame(self.explore_panel)
+        line.setFrameShape(QtWidgets.QFrame.NoFrame)
+        line.setFixedWidth(2)
+        line.setStyleSheet(f"background: {PANEL_BORDER}; border: none;")
+        return line
+
     def set_explore_controls(self, controls: list) -> None:
-        """Build one ExploreToggle per available control. Called once,
-        at construction, with whatever `available_explore_controls()`
-        found in this study's own manifest -- never a fixed UI list."""
+        """Build one ExploreToggle per available control, with a thin
+        divider between each pair (see _make_group_divider). Called
+        once, at construction, with whatever `available_explore_
+        controls()` found in this study's own manifest -- never a fixed
+        UI list."""
         for toggle in self._explore_toggles.values():
             self._explore_layout.removeWidget(toggle)
             toggle.deleteLater()
+        for divider in self._explore_dividers:
+            self._explore_layout.removeWidget(divider)
+            divider.deleteLater()
         self._explore_toggles = {}
+        self._explore_dividers = []
         self._explore_insert_index = 0
+        # Both real openings (Vent 1/vod, Vent 2/voc) get the same
+        # "air can move here" color language -- INERT (grey) for a shut
+        # state, AIRFLOW (cyan) for an open one -- instead of one of them
+        # being fan-styled and the other falling back to generic ACCENT
+        # (fire-orange, already meaning flame/candles elsewhere on
+        # screen). This colors the *opening's own state* (a real factor
+        # value), not a claim about measured effect size -- Vent 2's own
+        # near-null airspeed effect is still reported honestly by the
+        # noticeable_delta machinery in the science card, not hidden by
+        # this button's color. Candles and Door aren't openings a fan
+        # blows through, so they keep the plain ACCENT default.
+        _VENT_CHECKED_COLORS = {
+            "vent1": [AIRFLOW, INERT, AIRFLOW],   # open, closed, fan on
+            "vent2": [AIRFLOW, INERT],            # open, closed
+        }
         for control in controls:
-            # The fan is the one control where "on" has its own meaning
-            # worth a color (air moving) distinct from generic "selected"
-            # -- every other control keeps ExploreToggle's ACCENT default.
-            checked_colors = [INERT, AIRFLOW] if control.key == "fan" else None
+            if self._explore_toggles:   # every group but the first gets a divider first
+                divider = self._make_group_divider()
+                self._explore_layout.insertWidget(self._explore_insert_index, divider)
+                self._explore_insert_index += 1
+                self._explore_dividers.append(divider)
+            checked_colors = _VENT_CHECKED_COLORS.get(control.key)
             toggle = ExploreToggle(control.label, control.icon, control.options,
                                     checked_colors=checked_colors)
             toggle.value_changed.connect(
@@ -701,18 +798,18 @@ class PublicOverlay(QtWidgets.QWidget):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        # lang_en_button/lang_de_button used to sit fixed to exit_button's
+        # own left here -- now the top row of stat_panel (see
+        # _position_stat_group), which reads their real size but doesn't
+        # move them until that call below.
         self.exit_button.move(self.width() - self.exit_button.width() - 16, 16)
-        self.lang_de_button.move(self.exit_button.x() - self.lang_de_button.width() - 8, 16)
-        self.lang_en_button.move(
-            self.lang_de_button.x() - self.lang_en_button.width() - 6, 16)
         self.countdown.setGeometry(0, 0, self.width(), self.height())
         strip_width = min(460, max(320, self.width() - 80))
         self.stages.resize(strip_width, self.stages.height())
         self.stages.move((self.width() - strip_width) // 2,
                          self.height() - self.stages.height() - 6)
-        self._position_thermometer()
+        self._position_stat_group()
         self._position_scientist()
-        self._position_fan_marker()
         self._position_mascot()
 
     # Extra clearance below the thermometer's computed bottom edge, on
@@ -730,163 +827,326 @@ class PublicOverlay(QtWidgets.QWidget):
     # set_thermometer_visible's deferred re-position), overstating how
     # little room this control has to work with.
     _PROBE_DOCK_RESERVE = 20
+    # Carved out of the thermometer's own height so whichever mascot
+    # corner-hugs the true bottom-right (_position_mascot -- the worker,
+    # since the corner swap; originally tuned for Dr. Funke before she
+    # moved to bottom-left) has enough room -- 45px got her to her own
+    # native design resolution (Scientist._DESIGN_H = 108) back when she
+    # stood here; per a second round of direct feedback ("still too
+    # small relative to the engineer... move her so both mascots sit at
+    # the same vertical baseline"), 136 is what it actually takes for a
+    # 191px-tall occupant to stand at the primary mascot's own baseline
+    # (see _position_mascot's own margin=32) without overlapping the
+    # thermometer -- not the exact minimum: a few px of real slack so
+    # the pocket isn't immediately re-squeezed by the next sibling-
+    # geometry change that shifts `top` by a few px. Both mascots share
+    # the same 191px height (see Mascot/Scientist's own _DESIGN_H-driven
+    # setFixedSize calls), so this value carries over unchanged now that
+    # the worker occupies the corner it was tuned against. The
+    # thermometer's own height floor (max(220, ...) below) is what stops
+    # this from ever being raised further without also shrinking the
+    # thermometer below its own established minimum.
+    _BOTTOM_RIGHT_RESERVE_PX = 136
 
-    def set_thermometer_anchor(self, frac_x) -> None:
-        """The room's own real right-wall x, as a fraction of this
-        widget's width (see PublicScene.room_wall_anchor, fed through
-        PublicExperience the same way the fan/candle markers already are)
-        -- lets the thermometer dock beside the actual room geometry
-        instead of a fixed pixel offset from the window edge. None (no
-        manifest / wrong plane) falls back to the previous fixed-offset
-        behaviour."""
-        self._thermometer_anchor_frac = frac_x
-        if self.thermometer.isVisible():
-            self._position_thermometer()
+    # Horizontal/vertical padding inside stat_panel, and the gap between
+    # its three stacked rows (language toggle / meters / thermometer) --
+    # plain visual spacing, not tied to any of the reserve constants
+    # below (those guard against *other* widgets, this is just "don't
+    # paint flush against this panel's own border").
+    _STAT_PANEL_PADDING = 16
+    _STAT_PANEL_ROW_SPACING = 12
+    # Each meter chip's fixed width inside this panel -- deliberately
+    # much narrower than MeterChip's own un-flat 210px floor (see
+    # MeterChip's own flat= docstring for why: at 210px each, two side
+    # by side plus the thermometer made this whole panel wide enough to
+    # visually collide with the explore-control row below it, a real,
+    # measured overlap at 800x600). 115, not narrower still: the caption
+    # elides cleanly at any width (see MeterChip's own resizeEvent), so
+    # what actually floors this is the *value*/*phrase* labels, which
+    # still word-wrap -- checked via MeterChip.heightForWidth against
+    # every real reading/phrase this dataset can show, including the
+    # longest ("Sehr starker Luftstrom", the German very-strong-airflow
+    # phrase), for a still-reasonable 2-3 line wrap rather than an
+    # excessively tall chip a narrower floor would force.
+    _METER_CHIP_FLAT_WIDTH = 115
 
-    def _position_thermometer(self) -> None:
-        """Below both meter chips when they're on screen, above the stage
-        strip -- never overlapping either (a real, reproducible collision
-        at 800x600 before this was computed from live sibling geometry
-        instead of a fixed y). Falls back to a fixed top margin when the
-        meters are hidden (REVEAL/SCIENCE): a hidden widget's geometry is
-        stale, not "zero space", so trusting it there could place the
-        thermometer anywhere -- harmless left-right (it sits at the right
-        edge, clear of the centred card regardless of its y), but kept
-        deliberate rather than accidental.
+    def _position_stat_group(self) -> None:
+        """Lay out the language toggle, both meter chips, and the
+        thermometer as one visually connected panel, top to bottom --
+        previously three separately-floating elements (a real, repeated
+        complaint that they didn't read as belonging together). None of
+        the three groups is reparented into stat_panel (see its own
+        construction comment in __init__): every widget here stays a
+        direct child of this overlay, positioned in *this widget's* own
+        coordinate space exactly as before this panel existed, so every
+        other reader of that geometry elsewhere (the scientist bubble's
+        thermometer-column clamp, the worker mascot's thermometer-bottom
+        safety net) keeps working unmodified -- stat_panel is nothing
+        but the shared background/border wrapped around wherever this
+        method puts them.
+
+        A hidden row costs no space (a hidden meter row lets the
+        thermometer ride up to meet the language row above it) -- the
+        same "hidden means zero space, not a still-reserved gap" rule
+        the rest of this file follows.
         """
         self.layout().activate()
-        if self.temperature_meter.isVisible():
-            top = max(self.temperature_meter.geometry().bottom(),
-                      self.airflow_meter.geometry().bottom()) + 18
-        else:
-            # The exit button sits fixed at (width-60, 16, 44, 48)
-            # regardless of the meters -- the thermometer's right edge
-            # passes directly under it, so the fallback top must clear
-            # its bottom too, not just an arbitrary small margin.
-            top = self.exit_button.geometry().bottom() + 12
+        pad = self._STAT_PANEL_PADDING
+        spacing = self._STAT_PANEL_ROW_SPACING
+        # The exit button sits fixed at (width-60, 16, 44, 48) regardless
+        # of anything else in this panel -- its right edge lines up with
+        # the panel's own right edge, so the panel's top always clears
+        # its bottom, the same fallback the old thermometer-only version
+        # of this method used only when the meters were hidden; it's the
+        # only anchor available now that the meters live inside this
+        # panel rather than being laid out above it.
+        top = self.exit_button.geometry().bottom() + 12
         bottom_limit = (self.stages.y() if self.stages.y() > 0 else self.height()) - 20
-        # 380 -> 460: direct feedback that the thermometer read as
-        # squeezed -- raises the ceiling this can grow to when the
-        # sibling geometry (meters/stage strip) actually leaves the
-        # room; the max()/min() clamp already keeps it from overflowing
-        # whatever room there really is, so this only matters when
-        # there's more of it to use.
-        height = max(220, min(460, bottom_limit - self._PROBE_DOCK_RESERVE - top))
-        anchor = self._thermometer_anchor_frac
-        if anchor is not None:
-            # Docked just outside the room's real right wall, not
-            # centred on it -- the wall itself stays visible, the
-            # thermometer reads as "attached to the room" beside it.
-            # In practice this offset rarely binds: the room's right
-            # wall (ROOM_X[1]) is the domain's own right edge, i.e. the
-            # scene's full-bleed right edge too, so there is no real
-            # "outside the wall" space at 800x600 -- the clamp below
-            # (screen width minus the thermometer's own width) is what
-            # actually places it. Left in case a wider display ever
-            # gives this room to matter.
-            x = anchor * self.width() + 10
-        else:
-            x = self.width() - self.thermometer.width() - 14
-        # A wide button (e.g. "Try Fan OFF" on the reveal/science cards)
-        # can reach far enough right to clip the thermometer's left edge
-        # by a couple of pixels -- pushed clear of the widest current
-        # button rather than trusting a fixed inset to always be enough.
+
+        lang_w = self.lang_en_button.width() + 6 + self.lang_de_button.width()
+        content_w = lang_w
+
+        chip_w = self._METER_CHIP_FLAT_WIDTH
+        meters_visible = self.temperature_meter.isVisible()
+        if meters_visible:
+            # heightForWidth, not sizeHint -- these chips word-wrap now
+            # (see MeterChip's own flat= docstring), so their *preferred*
+            # (unwrapped) size isn't what they'll actually need at the
+            # fixed width this panel gives them.
+            temp_h = self.temperature_meter.heightForWidth(chip_w)
+            flow_h = self.airflow_meter.heightForWidth(chip_w)
+            meters_w = chip_w + 12 + chip_w
+            content_w = max(content_w, meters_w)
+
+        panel_w = max(content_w, self.thermometer.width()) + 2 * pad
+
+        # Always right-docked, a fixed inset from the window edge -- an
+        # earlier version docked this beside the room's real right wall
+        # instead (a physical-geometry anchor, matching the fan/candle
+        # markers' own convention), and it actively caused the exact
+        # "control bar runs into the stat panel" bug this whole method
+        # exists to avoid: that wall sits at a roughly constant *fraction*
+        # of the window width, so its anchored x grew slower than
+        # explore_panel's own right edge (which grows in lockstep with
+        # the window, one-to-one) as the window widened -- fine at
+        # 800x600, a measured 3px gap at 1024px, and a full, measured
+        # -73px/-265px overlap at 1280/1920px. A fixed inset from the
+        # window's own right edge grows at the same one-to-one rate
+        # explore_panel's own margin-driven right edge already does, so
+        # the gap between them stays constant instead of closing as the
+        # window widens.
+        x = self.width() - panel_w - 24
         button_rights = [b.geometry().right() for b in self._buttons if b.geometry().right() > 0]
         if button_rights:
             x = max(x, max(button_rights) + 12)
-        self.thermometer.resize(self.thermometer.width(), height)
         # int(): `anchor` (and so `x`) can be a numpy.float64 -- extent
-        # values come straight from the store's own array metadata --
-        # and QWidget.move() rejects that type outright. Previously
-        # masked by the fallback clamp below always winning with a plain
-        # int and min() returning it unchanged; now that SCENE_WIDTH_FRAC
-        # gives the anchor branch real room to be the smaller (and so
-        # winning) operand, the unconverted numpy type reached move()
-        # directly and raised.
-        self.thermometer.move(int(min(x, self.width() - self.thermometer.width() - 4)), top)
+        # values come straight from the store's own array metadata -- and
+        # QWidget.move() rejects that type outright.
+        panel_x = int(min(x, self.width() - panel_w - 4))
+
+        y = top + pad
+        self.lang_en_button.move(panel_x + (panel_w - lang_w) // 2, y)
+        self.lang_de_button.move(
+            self.lang_en_button.x() + self.lang_en_button.width() + 6, y)
+        y += self.lang_en_button.height() + spacing
+
+        if meters_visible:
+            meters_x0 = panel_x + (panel_w - meters_w) // 2
+            row_h = max(temp_h, flow_h)
+            self.temperature_meter.resize(chip_w, temp_h)
+            self.temperature_meter.move(meters_x0, y)
+            self.airflow_meter.resize(chip_w, flow_h)
+            self.airflow_meter.move(meters_x0 + chip_w + 12, y)
+            y += row_h + spacing
+
+        if self.thermometer.isVisible():
+            # 380 -> 460: direct feedback that the thermometer read as
+            # squeezed -- raises the ceiling this can grow to when the
+            # sibling geometry (meters/stage strip) actually leaves the
+            # room; the max()/min() clamp already keeps it from
+            # overflowing whatever room there really is.
+            #
+            # - self._BOTTOM_RIGHT_RESERVE_PX: the worker mascot's own
+            # pocket (see _position_mascot) is everything below wherever
+            # this height formula ends up putting the panel's bottom
+            # edge, down to the screen edge -- so without reserving space
+            # for him here explicitly, this formula (which knows nothing
+            # about him) would keep happily growing the thermometer into
+            # room he needs, capping him at a sliver. Reserved
+            # unconditionally, not just while he's visible: the pocket
+            # must not jump around (and re-trigger this same squeeze)
+            # every time visibility flips.
+            height = max(220, min(460, bottom_limit - self._PROBE_DOCK_RESERVE
+                                  - self._BOTTOM_RIGHT_RESERVE_PX - y))
+            self.thermometer.resize(self.thermometer.width(), height)
+            self.thermometer.move(panel_x + (panel_w - self.thermometer.width()) // 2, y)
+            y += height
+
+        self.stat_panel.setGeometry(panel_x, top, panel_w, y + pad - top)
 
     def _position_scientist(self) -> None:
-        """Dr. Funke stands in the sidebar's lower-right corner, below
-        the thermometer's own bottom edge -- not above it (a first pass
-        put her there, but at a wide dev window that spot sat directly
-        under the meter cards, which grow with the window in a way her
-        fixed offset from exit_button didn't track, and a real
-        screenshot showed her overlapping "Gentle drift"'s own text).
-        Anchoring off the thermometer's geometry instead of the meters
-        avoids that: _position_thermometer already reads the meters'
-        real height to place the thermometer, so anything anchored to
-        the thermometer inherits that same meters-awareness for free.
-        The thermometer is never shrunk to make room for her (Thermometer.
-        _paint_tube has its own hard-coded ~310px floor below which the
-        tube stops painting at all -- a real, screenshotted total loss of
-        the tube, bulb, reading and sparkline the first version of this
-        caused) -- she only ever uses whatever the thermometer leaves
-        below it.
-        """
+        """Dr. Funke now stands in the true bottom-left corner (swapped
+        with the worker mascot -- see the class-level swap note in
+        __init__, and _position_mascot for his new bottom-right spot):
+        same 32px margin on both the side and bottom edges the primary
+        mascot's own placement always used in this corner, so both
+        mascots' feet still sit on the exact same baseline
+        (self.height() - margin) regardless of which of them is on
+        which side."""
         if not self.scientist.isVisible():
             return
-        x = self.thermometer.x()
-        y = self.thermometer.geometry().bottom() + 8
-        y = min(y, self.height() - self.scientist.height() - 6)
-        self.scientist.move(x, y)
-        self._position_thought_bubble()
-
-    def _position_thought_bubble(self) -> None:
-        """To Dr. Funke's right, in the same lower-right pocket below
-        the thermometer. Side-by-side needs no extra vertical room at
-        all, and staying inside the gutter (right of SCENE_WIDTH_FRAC's
-        own cut) is what keeps it clear of the primary mascot's own
-        speech bubble, which occupies the wider centre-left of the
-        screen for most of OBSERVE."""
-        if not self.thought_bubble.isVisible():
-            return
-        x = self.scientist.geometry().right() + 6
-        y = self.scientist.y()
-        available_w = self.width() - x - 4
-        available_h = max(0, self.height() - y - 6)
-        width = max(150, min(self.thought_bubble.sizeHint().width(), available_w))
-        # fit_to shrinks the font as needed rather than letting a long
-        # (esp. German) fact grow past available_h into the thermometer's
-        # own caption -- see ThoughtBubble.fit_to's own comment.
-        self.thought_bubble.fit_to(width, available_h)
-        self.thought_bubble.move(int(x), y)
-
-    def _position_mascot(self) -> None:
-        """Pin the mascot bottom-left and the bubble to its right, both
-        sitting inside the band the layout's bottom margin reserves."""
         margin = 32
-        mascot_y = self.height() - self.mascot.height() - margin
-        self.mascot.move(margin, max(0, mascot_y))
+        scientist_y = self.height() - self.scientist.height() - margin
+        self.scientist.move(margin, max(0, scientist_y))
+        self._position_scientist_bubble()
 
-        if not self.bubble.isVisible():
+    def _position_scientist_bubble(self) -> None:
+        """To Dr. Funke's *right* now that she corner-hugs the true
+        bottom-left (swapped -- see _position_scientist), mirroring the
+        worker mascot's own old bubble-to-the-right formula for this
+        corner exactly, including the stat-panel-column clamp (a wide
+        bubble reaching right could still clip its left edge, docked at
+        the opposite corner -- checked against stat_panel as a whole,
+        not just the thermometer, since the language toggle/meters can
+        occupy that corner even when the thermometer itself is hidden)
+        and the stage-strip clamp (a tall wrapped bubble dipping into
+        that row)."""
+        if not self.scientist_bubble.isVisible():
             return
-        available = self.width() - self.mascot.width() - 3 * margin
-        if self.thermometer.isVisible():
-            # A long unwrapped line's natural sizeHint width can reach
-            # past the thermometer's left edge (a real overlap at
-            # 800x600 -- e.g. the observe-phase invitation sentence);
-            # the bubble must wrap sooner when that column is occupied.
-            available = min(available, self.thermometer.x() - self.mascot.x()
-                            - self.mascot.width() - 12)
-        hint = self.bubble.sizeHint()
+        margin = 32
+        available = self.width() - self.scientist.width() - 3 * margin
+        if self.stat_panel.isVisible():
+            available = min(available, self.stat_panel.x() - self.scientist.x()
+                            - self.scientist.width() - 12)
+        hint = self.scientist_bubble.sizeHint()
         width = max(240, min(hint.width(), available))
         # sizeHint()'s height assumes its own preferred width; recompute
         # at the width the bubble will actually get, or long text clips.
-        self.bubble.resize(width, self.bubble.heightForWidth(width))
-        # A long wrapped line can grow the bubble tall enough that its
-        # bottom edge dips into the stage strip's row (a real, if small,
-        # overlap at 800x600) -- clamped above it rather than trusting
-        # the fixed margin alone to always be enough clearance.
-        y = self.height() - self.bubble.height() - margin - 6
+        self.scientist_bubble.resize(width, self.scientist_bubble.heightForWidth(width))
+        y = self.height() - self.scientist_bubble.height() - margin - 6
         if self.stages.isVisible():
-            y = min(y, self.stages.y() - self.bubble.height() - 6)
-        self.bubble.move(self.mascot.x() + self.mascot.width() + 12, y)
+            y = min(y, self.stages.y() - self.scientist_bubble.height() - 6)
+        self.scientist_bubble.move(self.scientist.x() + self.scientist.width() + 12, y)
+
+    def _position_mascot(self) -> None:
+        """The worker mascot now stands in the true bottom-right corner
+        (swapped with Dr. Funke -- see the class-level swap note in
+        __init__), a full mirror of her own old bottom-right placement:
+        same 32px margin on both the side and bottom edges, and the
+        same safety-net clamp against stat_panel (the language toggle,
+        meters, and thermometer all dock along this same edge) for a
+        window size _BOTTOM_RIGHT_RESERVE_PX wasn't tuned against --
+        stat_panel's own geometry, not just the thermometer's, since it
+        stays current even when the thermometer itself is hidden but the
+        meters/language row above it still occupy this corner.
+
+        His speech bubble goes to his *left* here -- there's no room to
+        his right once he's flush against the screen edge -- bounded by
+        the same 32px screen margin rather than the thermometer's own x
+        (a tighter thermometer-relative bound caused a real,
+        screenshotted regression the one time it was tried for this
+        corner: see the git history around Dr. Funke's own bubble, back
+        when she stood here). Freely overlapping the scene area is fine:
+        PublicExperience._show_next_fact's own timing deferral is what
+        keeps the two bubbles from ever being up at once, not their
+        bounding boxes staying apart."""
+        margin = 32
+        x = self.width() - self.mascot.width() - margin
+        y = self.height() - self.mascot.height() - margin
+        y = max(y, self.stat_panel.geometry().bottom() + 2)
+        self.mascot.move(x, y)
+
+        if not self.bubble.isVisible():
+            return
+        mascot = self.mascot.geometry()
+        available_w = max(0, mascot.x() - 6 - margin)
+        available_h = max(0, self.height() - mascot.y() - 2)
+        width = max(20, min(self.bubble.sizeHint().width(), available_w))
+        self.bubble.fit_to(width, available_h)
+        x = mascot.x() - 6 - width
+        self.bubble.move(int(x), mascot.y())
+
+    # 12px clear gap above whichever mascot is taller, on top of the 32px
+    # margin _position_mascot/_position_scientist already move each
+    # mascot up from the true bottom edge -- without this a mascot's own
+    # top edge would land exactly on PublicScene's new reserved-strip
+    # boundary (see mascot_band_height_px), a hairline match that a
+    # pixel of rounding either way could turn into a visible overlap.
+    _MASCOT_BAND_GAP_PX = 12
+
+    def mascot_band_height_px(self) -> int:
+        """How many pixels PublicScene must reserve at its own bottom
+        edge (see PublicScene.set_bottom_reserve_px) so neither mascot's
+        real, fixed-size footprint ever overlaps the room/flame it
+        renders -- both mascots' own 32px bottom margin plus a small
+        clear gap, against whichever of the two is taller (they're equal
+        today, but this reads off their real geometry rather than
+        assuming that stays true). Called once, after both mascots exist
+        -- their sizes are fixed for the life of the app, so this never
+        needs to be recomputed."""
+        margin = 32
+        return max(self.mascot.height(), self.scientist.height()) + margin + self._MASCOT_BAND_GAP_PX
 
     # -- helpers --------------------------------------------------------
     def say(self, text: str, mood: str = IDLE) -> None:
+        # TEMPORARY diagnostic instrumentation for the real, live SIGABRT
+        # crash under investigation -- see PublicExperience._diag_depths'
+        # own comment. self._say_depth is set up in __init__.
+        self._say_depth += 1
+        if self._say_depth > 1:
+            print(f"[DIAG] REENTRANT: PublicOverlay.say depth={self._say_depth}", file=sys.stderr)
+            traceback.print_stack(file=sys.stderr)
+        else:
+            print("[DIAG] enter PublicOverlay.say", file=sys.stderr)
+        try:
+            self._say_inner(text, mood)
+        finally:
+            print(f"[DIAG] exit PublicOverlay.say (was depth {self._say_depth})", file=sys.stderr)
+            self._say_depth -= 1
+
+    def _say_inner(self, text: str, mood: str) -> None:
+        self._last_say_at = time.monotonic()
         self.bubble.set_text(text)
         self.mascot.set_mood(mood)
         self._position_mascot()
+        # Belt-and-braces on top of PublicExperience._show_next_fact's
+        # own defer-before-starting check: that only stops a *new* fact
+        # from beginning near a fresh say(), it does nothing about one
+        # already showing when the buddy suddenly needs to speak (a
+        # child's tap mid-fact triggers exactly that). Cutting her off
+        # here is what makes "the two mascots never both have bubbles up
+        # at once" hold in both directions, not just the common one.
+        #
+        # Deferred via a zero-ms parented QTimer, not called inline: say()
+        # itself usually runs from deep inside a signal/slot chain (a tap
+        # or toggle), and clearing scientist_bubble synchronously means
+        # another widget's set_text()/updateGeometry()/update() executes
+        # while that same call stack is still unwinding -- reentrant Qt
+        # event handling this app has hit a real, hard-to-diagnose crash
+        # from before. A 0ms singleShot still fires before the next
+        # visible frame (no perceptible delay) but moves the work onto
+        # its own fresh top-level event-loop turn instead. Parented to
+        # self, not a bare QTimer.singleShot, for the same reason
+        # PublicExperience._defer's own docstring gives: a bare one-shot's
+        # callback still fires even after this widget is gone.
+        if self.scientist_bubble.isVisible():
+            timer = QtCore.QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(lambda: self.scientist_bubble.set_text(""))
+            timer.start(0)
+
+    def seconds_since_say(self) -> float:
+        """How long since the primary mascot last spoke -- the signal
+        Dr. Funke's own ambient timer defers on (see PublicExperience.
+        _show_next_fact), so her facts never land while the buddy is
+        also mid-utterance. Tracked here, at say()'s single choke point,
+        rather than at each of its ~40 call sites across experience.py:
+        the primary guide's own invitation text stays visible for the
+        whole of OBSERVE once set (say() has no auto-hide), so a plain
+        `bubble.isVisible()` check would block her forever -- this is
+        specifically "how long since a *fresh* utterance", not "is a
+        bubble currently on screen"."""
+        return time.monotonic() - self._last_say_at
 
     def set_prompt(self, text: str) -> None:
         self.banner.set_prompt(text)
@@ -907,6 +1167,13 @@ class PublicOverlay(QtWidgets.QWidget):
     def set_meters_visible(self, visible: bool) -> None:
         self.temperature_meter.setVisible(visible)
         self.airflow_meter.setVisible(visible)
+        # The meters used to live in root's own layout, which reflowed
+        # everything below them automatically on a visibility change --
+        # now that they're one row of the manually-positioned stat_group
+        # (see _position_stat_group), hiding/showing them has to trigger
+        # that reflow explicitly, or the thermometer (and the panel's own
+        # bounding box) stays sized for whichever state was last laid out.
+        self._position_stat_group()
 
     def update_meters(self, room_temp_c: float, mean_airspeed: float,
                       has_velocity: bool = True) -> None:

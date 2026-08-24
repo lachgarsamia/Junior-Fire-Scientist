@@ -170,7 +170,7 @@ FAN_EXPERIMENT = Experiment(
     # Short labels on purpose: three choice buttons have to sit side by
     # side and stay readable from a couple of metres away.
     predictions=(
-        Prediction("bigger", "prediction_bigger_fire", "🔥"),
+        Prediction("bigger", "prediction_bigger_fire", "📈"),
         Prediction("cooler", "prediction_cooler_room", "❄️", metric_key="room_temp",
                    confirmation_key="prediction_cooler_confirmation"),
         Prediction("nothing", "prediction_nothing_changes", "😐"),
@@ -254,30 +254,42 @@ class ExploreControl:
             self.case_for(manifest, opt.value) is not None for opt in self.options)
 
 
-# Three explore controls, all real factors in this study's own factorial
+# Four explore controls, all real factors in this study's own factorial
 # (candles x door x vod x voc, all 24 combinations present -- see
-# manifest.factor_counts). The door alone is left out: this is a
-# free-play sandbox meant to be grasped in a glance, and the door's
-# measured effect is close to null (see the module docstring), so
-# exposing it here would teach the opposite of what the fan control
-# teaches in the same breath.
+# manifest.factor_counts) -- one control per factor the original FDS
+# input files actually vary, named and stated to match them exactly
+# (fds/generate_sim.py's candle/door/vertical_opening_1/vertical_opening_2,
+# manifest.py's candles/door/vod/voc). No control is a stand-in name for a
+# factor ("fan" used to be) or an invented state -- every ExploreOption
+# below is one of the real levels generate_sim.py actually produced.
 #
-# The candle-side vent (voc, "vent2" below) *is* exposed, deliberately,
-# even though it measures just as null as the door:
-#   voc open -> closed, vod=0 (baseline): mean air speed 0.085 ->
-#     0.076 m/s (below the 0.02 m/s noticeable_delta), room temp 26.5 ->
-#     26.3 C (below the 0.3 C one) -- measured the same way the module
-#     docstring's door numbers were, not assumed identical to them.
-# Unlike the door, this is a real physical vent visitors can see and
-# reach in the scene (PublicScene draws it next to the candle), and the
-# existing noticeable_delta honesty machinery already reports "about the
-# same" rather than dressing up a null result -- so toggling it teaches
-# a real, honest lesson ("not everything you can touch changes much")
-# instead of a fabricated one.
+# Vent 1 (vod) has three real states: open, closed, and HVAC -- the HVAC
+# state is a real powered fan (see fds/template_hvac.fds's &HVAC blocks),
+# which is why it gets its own distinct "FAN ON" option/color rather than
+# being folded into "open" as the old binary fan control did (that control
+# skipped the closed state entirely -- see git history).
+#
+# Vent 2 (voc) has two real states, open/closed, and no fan -- there is no
+# HVAC block on this opening. Its measured effect is close to null (open ->
+# closed, vod=0 baseline: mean air speed 0.085 -> 0.076 m/s, below the
+# 0.02 m/s noticeable_delta; room temp 26.5 -> 26.3 C, below the 0.3 C
+# one) -- measured the same way the module docstring's door numbers were,
+# not assumed identical to them. Exposing it anyway teaches a real, honest
+# lesson ("not everything you can touch changes much") via the existing
+# noticeable_delta machinery, which already reports "about the same"
+# rather than dressing up a null result.
+#
+# Door: also close to null (module docstring: +-0.03 m/s, 0.0-1.7 C) --
+# previously left out of free play for exactly that reason. Exposed here
+# per supervisor feedback: the original setup has a real, visible door and
+# hiding it was itself teaching an incomplete picture of the setup. Same
+# honesty machinery as Vent 2 covers it.
 EXPLORE_CONTROLS = (
     ExploreControl(
-        "fan", "control_fan_label", "💨", "vod",
-        (ExploreOption(0, "option_off", "🚫"), ExploreOption(2, "option_on", "🌬️")),
+        "vent1", "control_vent1_label", "🌬️", "vod",
+        (ExploreOption(0, "option_vent_open", "🔓"),
+         ExploreOption(1, "option_vent_closed", "🔒"),
+         ExploreOption(2, "option_fan_on", "🌀")),
         held={"candles": 0, "door": 1, "voc": 0}),
     ExploreControl(
         "candles", "control_candles_label", "🕯️", "candles",
@@ -289,6 +301,11 @@ EXPLORE_CONTROLS = (
         (ExploreOption(0, "option_vent_open", "🔓"),
          ExploreOption(1, "option_vent_closed", "🔒")),
         held={"candles": 0, "door": 1, "vod": 0}),
+    ExploreControl(
+        "door", "control_door_label", "🚪", "door",
+        (ExploreOption(0, "option_door_narrow", "🚪"),
+         ExploreOption(1, "option_door_wide", "🚪")),
+        held={"candles": 0, "vod": 0, "voc": 0}),
 )
 
 
@@ -463,7 +480,7 @@ PUBLIC_METRICS = (
     # 40 °C keeps the flame row consistent with what the reveal already
     # tells visitors -- that the flame burns about as hot either way --
     # while still showing both measured values.
-    Metric("flame_temp", "metric_flame_temp_label", "🔥", "°C", 0, "peak_temperature",
+    Metric("flame_temp", "metric_flame_temp_label", "🕯️", "°C", 0, "peak_temperature",
            "metric_hotter", "metric_cooler", 40.0,
            "metric_flame_temp_meaning",
            kid_subject_key="metric_flame_temp_kid_subject",

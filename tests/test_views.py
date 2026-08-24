@@ -214,6 +214,50 @@ class TestSliceViewEmberParticles:
         assert view._ember_sim is None
         assert len(view.ember_scatter.get_offsets()) == 0
 
+    COLD_FRAME = np.full((49, 101), 20.0, dtype=np.float32)
+
+    def test_reset_cinema_simulators_clears_embers_and_smoke(self, qapp):
+        """Regression: cinematic mode itself is enabled once and never
+        turned off (see set_cinematic_mode's own docstring), so its ember
+        and smoke simulators used to just keep stepping across a scenario
+        switch with no way to clear them -- a public-mode candle-count
+        change (e.g. 2 -> 1) left the removed candle's embers/smoke
+        visibly lingering at a position the new scenario has no fire at
+        all, even though the new frame data (HOT_FRAME swapped for
+        COLD_FRAME here, standing in for "switched to a cooler scenario")
+        was already completely correct."""
+        view = SliceView()
+        view.init_plot(self.HOT_FRAME, cmap="gist_heat", interpolation="nearest",
+                        vmin=20.0, vmax=300.0, colorbar_label="Temperature (°C)")
+        view.set_cinematic_mode(True, vmin=20.0, vmax_init=300.0)
+        for _ in range(20):
+            view.show_frame(self.HOT_FRAME, next_frame=self.HOT_FRAME)
+        assert len(view._ember_sim.pos) > 0, "sanity: the hot frame really did spawn embers"
+        assert view._cinema_pipeline._smoke.buffer.max() > 0, "sanity: smoke really did accumulate"
+
+        view.reset_cinema_simulators()
+
+        assert len(view._ember_sim.pos) == 0
+        assert len(view.ember_scatter.get_offsets()) == 0
+        # The smoke buffer itself is dropped (None), not merely zeroed --
+        # render() lazily recreates a fresh one on the next call, the same
+        # path a shape change already relies on.
+        assert view._cinema_pipeline._smoke is None
+        # A cold frame afterward must show *no* residual smoke density --
+        # the actual, real-world symptom (a lingering haze at the
+        # removed candle's position) rather than just checking internal
+        # bookkeeping in isolation.
+        view.show_frame(self.COLD_FRAME, next_frame=self.COLD_FRAME)
+        assert view._cinema_pipeline._smoke.buffer.max() == pytest.approx(0.0, abs=1e-6)
+
+    def test_reset_is_a_no_op_when_cinematic_mode_is_off(self, qapp):
+        """No simulators exist outside cinematic mode -- must not raise."""
+        view = SliceView()
+        view.init_plot(self.HOT_FRAME, cmap="gist_heat", interpolation="nearest",
+                        vmin=20.0, vmax=300.0, colorbar_label="Temperature (°C)")
+        view.reset_cinema_simulators()   # must not raise
+        assert view._ember_sim is None
+
 
 class TestSliceViewProbe:
     """Corner/known-pixel accuracy for value_at() (M2.6.1's DoD: "probe

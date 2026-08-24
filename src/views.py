@@ -47,7 +47,13 @@ _VENT_STATE_COLORS = {"open": "#22C55E", "closed": "#94A3B8", "HVAC": "#F59E0B"}
 # multiplies these, so both init_plot (construction) and set_ui_scale
 # (later changes) agree on the same unscaled numbers.
 _ROOM_WALL_LW = 1.4
-_ROOM_DOOR_LW = 2.6
+# 2.6 -> 9.0: a thin line the same weight as the dashed wall it sits
+# inside of read as part of the wall outline, not its own object --
+# confirmed by an 800x600 screenshot where toggling Door NARROW/WIDE
+# produced no perceptible change (the segment *did* update, correctly,
+# it just wasn't legible as "a door"). Matches/exceeds _ROOM_VENT_LW so
+# the door reads with the same visual weight the vents already have.
+_ROOM_DOOR_LW = 9.0
 _ROOM_VENT_LW = 4.0
 
 
@@ -524,6 +530,34 @@ class SliceView:
             self.ax.set_facecolor(MplCanvas.PLOT_BG)
             self.colorbar.ax.set_visible(True)
         self.canvas.capture_background()
+
+    def reset_cinema_simulators(self) -> None:
+        """Clear every live ember, the smoke density buffer, and the
+        auto-exposure ceiling on a real scenario switch (cinematic mode
+        itself stays on for the whole session -- see set_cinematic_mode's
+        own "enabled once, never turned off" docstring -- so without this
+        all three just keep stepping whatever state they already had,
+        letting embers/smoke spawned against the *previous* scenario's
+        hot spots drift/decay across the switch instead of disappearing
+        with it, and the exposure ceiling ease toward the new scenario's
+        brightness over several frames instead of snapping to it). A
+        public-mode candle-count change (e.g. 2 -> 1) is exactly this:
+        the removed candle's embers and smoke would otherwise linger
+        (embers for their own LIFETIME_FRAMES, smoke as a slowly-decaying
+        haze) at a position the new scenario has no fire at, and the
+        remaining candle's own brightness would visibly settle in over
+        the next several frames instead of appearing at its real level
+        immediately -- together reading as a leftover flame fading out
+        rather than disappearing outright. No-op on whichever piece is
+        inactive (cinematic mode off, or no smoke buffer allocated yet)."""
+        if self._ember_sim is not None:
+            self._ember_sim.reset()
+        self.ember_scatter.set_offsets(np.empty((0, 2)))
+        self.ember_scatter.set_sizes([])
+        self.ember_scatter.set_facecolor([])
+        if self._cinema_pipeline is not None:
+            self._cinema_pipeline.reset_smoke()
+            self._cinema_pipeline.reset_exposure()
 
     def _index_to_display_xy(self, rows, cols):
         """(row, col) array-index coordinates -> (x, y) display

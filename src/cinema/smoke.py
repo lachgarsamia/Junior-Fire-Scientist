@@ -57,7 +57,7 @@ SWAY_AMPLITUDE = 0.4              # subtle horizontal jitter, columns
 VELOCITY_SCALE = 0.5              # tier 2: m/s -> columns-or-rows/frame
 UP_BIAS = 0.55                    # tier 2: blend weight of "straight up" vs "away from hot core"
 
-SMOKE_TINT = np.array([120.0, 110.0, 100.0], dtype=np.float32)  # gray-brown haze
+SMOKE_TINT = np.array([172.0, 176.0, 182.0], dtype=np.float32)  # neutral grey-white haze
 SMOKE_OPACITY = 0.75
 
 
@@ -111,8 +111,8 @@ class SmokeSimulator:
 
 
 def smoke_rgba(density: np.ndarray) -> np.ndarray:
-    """density (H, W) float -> (H, W, 4) uint8, a flat gray-brown tint
-    whose alpha follows the density buffer."""
+    """density (H, W) float -> (H, W, 4) uint8, a flat neutral grey-white
+    tint whose alpha follows the density buffer."""
     alpha = np.clip(density * SMOKE_OPACITY, 0.0, 1.0)
     out = np.empty(density.shape + (4,), dtype=np.uint8)
     out[..., 0] = SMOKE_TINT[0]

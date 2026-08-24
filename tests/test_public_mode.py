@@ -2162,7 +2162,12 @@ class TestScientificCoherence:
         for text in (metric.label, metric.meaning, metric.explanation,
                      metric.kid_subject):
             assert "room" not in text.lower(), text
-        assert experience.overlay.temperature_meter._caption.text() == "AIR TEMPERATURE"
+        # _caption_full_text, not ._caption.text(): the displayed label
+        # is elided to fit the narrow stat-panel chip now (see
+        # MeterChip's own flat= docstring), so the on-screen text can be
+        # "AIR TEMP…" -- the full underlying string (what this test
+        # actually cares about not saying "room") still lives here.
+        assert experience.overlay.temperature_meter._caption_full_text == "AIR TEMPERATURE"
 
     def test_mascot_never_outruns_the_data(self, experience):
         """Every spoken finding must come from a comparison that cleared
@@ -2837,7 +2842,7 @@ class TestExploreControls:
         experience._begin_journey()
         experience._start_observe()
         before = experience.state.case_index
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         after = experience.state.case_index
         assert after != before
         entry = next(e for e in experience.sim_data.manifest if e.case_index == after)
@@ -2859,7 +2864,7 @@ class TestExploreControls:
         said = []
         original = experience.overlay.say
         experience.overlay.say = lambda t, m=None: (said.append(t), original(t, m))[1]
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         assert any("you changed the experiment" in s.lower() for s in said)
 
         said.clear()
@@ -2873,7 +2878,7 @@ class TestExploreControls:
         experience._begin_journey()
         experience._start_observe()
         before = experience.state.case_index
-        experience._on_explore_changed("fan", 999)
+        experience._on_explore_changed("vent1", 999)
         assert experience.state.case_index == before
 
     def test_factor_changes_compose_instead_of_resetting_each_other(self, experience):
@@ -2885,21 +2890,21 @@ class TestExploreControls:
         visual state stays composed, not just the resolved case_index."""
         experience._begin_journey()
         experience._start_observe()
-        fan_toggle = experience.overlay._explore_toggles["fan"]
+        fan_toggle = experience.overlay._explore_toggles["vent1"]
         candles_toggle = experience.overlay._explore_toggles["candles"]
         vent2_toggle = experience.overlay._explore_toggles["vent2"]
 
-        fan_toggle._group.button(1).click()   # "ON"
-        assert fan_toggle._group.checkedId() == 1
+        fan_toggle._group.button(2).click()   # "FAN ON" (3rd of 3 real vod options)
+        assert fan_toggle._group.checkedId() == 2
 
         candles_toggle._group.button(1).click()   # "2 candles"
-        assert fan_toggle._group.checkedId() == 1   # still ON, not reset
+        assert fan_toggle._group.checkedId() == 2   # still ON, not reset
         entry = next(e for e in experience.sim_data.manifest
                      if e.case_index == experience.state.case_index)
         assert entry.vod == 2 and entry.candles == 1
 
         vent2_toggle._group.button(1).click()   # "SHUT"
-        assert fan_toggle._group.checkedId() == 1        # still ON
+        assert fan_toggle._group.checkedId() == 2        # still ON
         assert candles_toggle._group.checkedId() == 1    # still 2 candles
         entry = next(e for e in experience.sim_data.manifest
                      if e.case_index == experience.state.case_index)
@@ -2908,7 +2913,7 @@ class TestExploreControls:
     def test_explore_only_acts_during_observe(self, experience):
         experience._begin_journey()   # phase is INTRO
         before = experience.state.case_index
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         assert experience.state.case_index == before
 
     def test_explore_panel_visible_only_during_observe(self, experience):
@@ -2923,11 +2928,11 @@ class TestExploreControls:
     def test_toggles_reset_to_baseline_on_replay(self, experience):
         experience._begin_journey()
         experience._start_observe()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         experience.time_controller.pause()
         experience._on_replay()
         assert experience.state.case_index == experience.state.baseline_case_index
-        fan_toggle = experience.overlay._explore_toggles["fan"]
+        fan_toggle = experience.overlay._explore_toggles["vent1"]
         assert fan_toggle._group.checkedId() == 0
 
     def test_toggles_reset_on_kiosk_idle(self, experience):
@@ -2962,9 +2967,9 @@ class TestCandleMarker:
         window.close()
 
     def test_patch_count_matches_the_real_candle_count(self, experience, sim_data):
-        """Each candle is body + wick + a small lit-flame anchor (a glow
-        circle plus three warm-to-hot layers, see PublicScene._draw_flame)
-        -- 6 patches per candle."""
+        """Each candle is body + wick + a small lit-flame anchor (three
+        warm-to-hot layers, no glow/halo behind them, see
+        PublicScene._draw_flame) -- 5 patches per candle."""
         if sim_data.is_demo:
             pytest.skip("real dataset not present")
         one = experiments_mod.resolve_case_index(sim_data.manifest, {
@@ -2972,15 +2977,48 @@ class TestCandleMarker:
         two = experiments_mod.resolve_case_index(sim_data.manifest, {
             "candles": 1, "door": 1, "vod": 0, "voc": 0})
         experience._load_case(one)
-        assert len(experience.scene._candle_patches) == 6    # 1 candle
+        assert len(experience.scene._candle_patches) == 5    # 1 candle
         experience._load_case(two)
-        assert len(experience.scene._candle_patches) == 12   # 2 candles
+        assert len(experience.scene._candle_patches) == 10   # 2 candles
 
-    def test_candle_x_position_matches_the_real_burner_location(self, experience):
-        from schematic import _CANDLE_X
-        assert experience.scene._candle_signature is not None
-        for x in experience.scene._candle_signature:
-            assert _CANDLE_X[0] <= x <= _CANDLE_X[1]
+    def test_candle_x_position_matches_the_real_burner_location(self, experience, sim_data, qapp):
+        """Checks the sprite's x actually sits on a hot cell in the real
+        measured field -- not just inside _CANDLE_X's own plausible band,
+        which is all an earlier version of this test checked. That
+        weaker check passed even for the 1-candle sprite sitting at the
+        bare midpoint (x=0.90), a genuinely cool 4cm gap between the two
+        real burner slots that read ~21C, a real bug a live screenshot
+        caught that this test should have (see _draw_candles's own
+        comment on the fix). Checked for both candle counts, since the
+        2-candle branch's own two slots were already correct and should
+        stay that way."""
+        if sim_data.is_demo:
+            pytest.skip("real dataset not present")
+        from schematic import ROOM_Z
+        # ATTRACT (this fixture's default phase, never having called
+        # _begin_journey) loops the fire on its own timer -- pausing it
+        # is what keeps an explicit show_frame() from being raced and
+        # overwritten by that loop the instant qapp.processEvents() next
+        # runs. A first version of this test skipped that and got a
+        # real, flaky false failure from whatever frame the loop had
+        # wandered to, not the one it asked for.
+        experience.time_controller.pause()
+        for candles in (0, 1):
+            case_index = experiments_mod.resolve_case_index(sim_data.manifest, {
+                "candles": candles, "door": 1, "vod": 0, "voc": 0})
+            experience._load_case(case_index)
+            assert experience.scene._candle_signature is not None
+            n_frames = experience.scene._temperature.shape[0]
+            # Checked across several well-after-ignition frames, not one:
+            # a real flame's own temperature genuinely flickers frame to
+            # frame, so the bar is "clearly hot at its best moment in this
+            # stretch," not "hot at this one arbitrary tick."
+            for x in experience.scene._candle_signature:
+                readings = []
+                for frac in (0.3, 0.5, 0.7, 0.9):
+                    experience.scene.show_frame(int(n_frames * frac))
+                    readings.append(experience.scene.view.value_at(x, ROOM_Z[0]))
+                assert max(readings) > 150.0, (candles, x, readings)
 
     def test_unchanged_signature_skips_the_redraw(self, experience):
         """The perf-motivated cache: switching a factor that doesn't
@@ -3022,13 +3060,10 @@ class TestFlameFlicker:
         yield window.public_experience
         window.close()
 
-    def test_flame_layers_and_glow_are_registered_for_animation(self, experience):
+    def test_flame_layers_are_registered_for_animation(self, experience):
         scene = experience.scene
         assert scene._flame_layers_anim
-        assert scene._flame_glows
         for patch, *_ in scene._flame_layers_anim:
-            assert patch in scene.view._extra_animated
-        for patch, _radius in scene._flame_glows:
             assert patch in scene.view._extra_animated
 
     def test_jitter_changes_the_flame_geometry_across_frames(self, experience):
@@ -3084,6 +3119,138 @@ class TestFlameFlicker:
         scene._jitter_flame(0)   # nothing to animate; must not raise
 
 
+class TestFlameCountMatchesCandleCount:
+    """Regression coverage for 'flame count must always equal the
+    selected candle count, with nothing left over from a previous
+    selection' -- both the schematic flame anchors (already covered by
+    TestCandleMarker's patch-count check, re-asserted here alongside the
+    cinema layer) and the two stateful cinema simulators (EmberParticles,
+    SmokeSimulator) that -- unlike the schematic patches -- are NOT
+    rebuilt on every load_case(); see SliceView.reset_cinema_simulators,
+    called from PublicScene.load_case, which is the one thing standing
+    between a switch and a genuinely leftover ember/smoke render at the
+    old candle's position."""
+
+    @pytest.fixture
+    def experience(self, qapp):
+        sim = load_simulation_data()
+        if sim.is_demo:
+            pytest.skip("real dataset not present")
+        window = MainWindow(sim)
+        window.resize(800, 600)
+        window.show()
+        for _ in range(6):
+            qapp.processEvents()
+        window.enter_public_mode()
+        yield window.public_experience
+        window.close()
+
+    def test_flame_patch_count_is_exactly_five_times_candle_count_after_any_switch(
+        self, experience, sim_data
+    ):
+        if sim_data.is_demo:
+            pytest.skip("real dataset not present")
+        one = experiments_mod.resolve_case_index(sim_data.manifest, {
+            "candles": 0, "door": 1, "vod": 0, "voc": 0})
+        two = experiments_mod.resolve_case_index(sim_data.manifest, {
+            "candles": 1, "door": 1, "vod": 0, "voc": 0})
+        # A non-trivial switch sequence (1 -> 2 -> 1 -> 2), not just a
+        # single switch -- a stale-count bug that only shows up on the
+        # *second* return to a previously-seen candle count would slip
+        # past a test that only checked one transition.
+        for case_index, n_candles in [(one, 1), (two, 2), (one, 1), (two, 2)]:
+            experience._load_case(case_index)
+            assert len(experience.scene._candle_patches) == 5 * n_candles
+            # Three warm-to-hot flicker layers per candle (see
+            # TestFlameFlicker's docstring / _draw_flame).
+            assert len(experience.scene._flame_layers_anim) == 3 * n_candles
+
+    def test_cinema_simulators_are_clean_immediately_after_a_candle_count_switch(
+        self, experience, sim_data
+    ):
+        """The literal 'nothing left over from a previous selection'
+        requirement, checked at the data layer rather than by eye: no
+        live ember particles and a fully-decayed-to-zero smoke buffer
+        the instant a switch lands, before any new frame has had a
+        chance to populate them fresh. Ember/smoke spawning is itself
+        driven by show_frame() (see SliceView.update_effects), so
+        checking right after _load_case -- before any show_frame call --
+        isolates reset_cinema_simulators' own guarantee from whatever
+        the next frame would legitimately draw."""
+        if sim_data.is_demo:
+            pytest.skip("real dataset not present")
+        one = experiments_mod.resolve_case_index(sim_data.manifest, {
+            "candles": 0, "door": 1, "vod": 0, "voc": 0})
+        two = experiments_mod.resolve_case_index(sim_data.manifest, {
+            "candles": 1, "door": 1, "vod": 0, "voc": 0})
+        view = experience.scene.view
+        if view._ember_sim is None:
+            pytest.skip("cinematic mode not active in this configuration")
+        experience._load_case(two)
+        experience.scene.show_frame(20)   # let embers/smoke actually build up
+        assert view._ember_sim.pos.shape[0] > 0 or view._cinema_pipeline._smoke is not None
+
+        experience._load_case(one)   # the switch under test
+        assert view._ember_sim.pos.shape[0] == 0, (
+            "embers from the removed candle survived the switch")
+        smoke = view._cinema_pipeline._smoke
+        if smoke is not None:
+            assert float(smoke.buffer.max()) == 0.0, (
+                "smoke density from the removed candle survived the switch")
+
+    def test_the_real_click_driven_2_to_1_and_1_to_2_transitions_hold_the_invariant(
+        self, experience, sim_data, qapp
+    ):
+        """Reported and 'fixed' twice before (a stale visual trace, then
+        a fade-delay) and still recurring per direct feedback -- routed
+        through _on_explore_changed (the real click path a Candles
+        toggle press takes), not _load_case directly, and through
+        PublicScene._draw_candles' own enforced assertion (flame count
+        == 3 * candle count, checked on every draw, not just here) so a
+        fourth regression fails loudly at the source instead of silently
+        rendering an extra flame."""
+        if sim_data.is_demo:
+            pytest.skip("real dataset not present")
+        experience._begin_journey()
+        experience._start_observe()
+        for value, n_candles in [(1, 2), (0, 1), (1, 2), (0, 1)]:
+            experience._on_explore_changed("candles", value)
+            for _ in range(6):
+                qapp.processEvents()
+            assert len(experience.scene._candle_patches) == 5 * n_candles
+            assert len(experience.scene._flame_layers_anim) == 3 * n_candles
+
+    def test_candle_count_survives_a_switch_driven_by_a_different_control(
+        self, experience, sim_data, qapp
+    ):
+        """The direct Candles-toggle test above only proves the toggle's
+        own path is safe -- it says nothing about Door/Vent 1/Vent 2
+        loading an entirely different scenario file out from under
+        whatever the Candles selector is currently set to. Every explore
+        control funnels through the same PublicScene.load_case (which
+        unconditionally calls _draw_candles -- confirmed by reading it,
+        not assumed; there is no separate scene-rebuild path a Door/Vent
+        switch could take instead), so the composition this checks is in
+        _on_explore_changed/_current_factors, not a second render path."""
+        if sim_data.is_demo:
+            pytest.skip("real dataset not present")
+        experience._begin_journey()
+        experience._start_observe()
+        for candles_value, n_candles in [(0, 1), (1, 2)]:   # both directions
+            experience._on_explore_changed("candles", candles_value)
+            for _ in range(6):
+                qapp.processEvents()
+            for control_key, other_value in [("door", 0), ("vent1", 2), ("vent2", 1)]:
+                experience._on_explore_changed(control_key, other_value)
+                for _ in range(6):
+                    qapp.processEvents()
+                entry = experience.scene.current_entry()
+                assert entry.candles == candles_value, (
+                    f"{control_key}={other_value} reset candles to {entry.candles}")
+                assert len(experience.scene._candle_patches) == 5 * n_candles
+                assert len(experience.scene._flame_layers_anim) == 3 * n_candles
+
+
 class TestInteractionResponsiveness:
     """Click-to-acknowledgement: a real scenario switch must stay well
     under perceptible-lag territory now that both scenarios' stories are
@@ -3115,7 +3282,7 @@ class TestInteractionResponsiveness:
         experience._begin_journey()   # triggers _prewarm_stories
         experience._start_observe()
         start = time.perf_counter()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         elapsed_ms = (time.perf_counter() - start) * 1000
         # Generous versus the ~40 ms measured locally -- this guards
         # against a real regression (e.g. losing the story-cache warm
@@ -3129,7 +3296,7 @@ class TestInteractionResponsiveness:
         asserted here so a future widget rewrite can't silently lose it."""
         experience._begin_journey()
         experience._start_observe()
-        toggle = experience.overlay._explore_toggles["fan"]
+        toggle = experience.overlay._explore_toggles["vent1"]
         seen_checked_state = []
 
         def on_change(_value):
@@ -3159,17 +3326,24 @@ class TestCandleCallout:
         window.close()
 
     def _candle_widget_pos(self, experience):
-        from schematic import _CANDLE_X, ROOM_Z
+        # Reads _candle_signature (the sprite's own actual x, set by
+        # _draw_candles) rather than recomputing sum(_CANDLE_X)/2 here
+        # independently -- an earlier version of this helper did that,
+        # which meant it silently kept testing the bare midpoint even
+        # after _draw_candles moved the real sprite off of it (the fix
+        # for a real bug: that midpoint sits in a cool 4cm gap between
+        # the two actual burner slots, not on either one).
+        from schematic import ROOM_Z
         canvas = experience.scene.view.canvas
-        cx = sum(_CANDLE_X) / 2
+        cx = experience.scene._candle_signature[0]
         frac = experience.scene.widget_fraction_for(cx, ROOM_Z[0] + 0.01)
         return QtCore.QPoint(int(frac[0] * canvas.width()), int(frac[1] * canvas.height()))
 
     def test_candle_hit_detects_the_real_burner_location(self, experience):
-        from schematic import _CANDLE_X, ROOM_Z
+        from schematic import ROOM_Z
         experience._begin_journey()
         experience._start_observe()
-        cx = sum(_CANDLE_X) / 2
+        cx = experience.scene._candle_signature[0]
         assert experience.scene.candle_hit(cx, ROOM_Z[0] + 0.01) is True
         # Well away from the candle (near the domain's left edge): not a hit.
         assert experience.scene.candle_hit(0.05, ROOM_Z[0] + 0.01) is False
@@ -3181,7 +3355,7 @@ class TestCandleCallout:
             qapp.processEvents()
         experience._on_overlay_tapped(self._candle_widget_pos(experience))
         assert "flame" in experience.overlay.thermometer._caption.text().lower()
-        assert "🔥" in experience.overlay.thermometer._caption.text()
+        assert "🕯️" in experience.overlay.thermometer._caption.text()
         assert "candle" in experience.overlay.bubble.text().lower()
 
     def test_candle_callout_still_uses_a_real_measured_value(self, experience, qapp):
@@ -3337,7 +3511,7 @@ class TestThermometer:
         canvas = experience.scene.view.canvas
         centre = QtCore.QPoint(canvas.width() // 2, canvas.height() // 2)
         experience._on_overlay_tapped(centre)
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         assert experience._probe_mode == "mean"
         assert experience._probe_xz is None
 
@@ -3414,9 +3588,10 @@ class TestDragToScan:
         assert positions == []
 
 
-class TestFanMarker:
-    """The fan is a real object in the scene, anchored to the manifest's
-    own vent geometry -- never a fixed screen position."""
+class TestVentGeometry:
+    """Vent 1's on-screen object is anchored to the manifest's own vent
+    geometry -- never a fixed screen position (see PublicScene.
+    _draw_vent_object, which vent_marker_position feeds)."""
 
     @pytest.fixture
     def experience(self, qapp):
@@ -3442,23 +3617,277 @@ class TestFanMarker:
         position = experience.scene.vent_marker_position(experience.state.case_index)
         assert position[0] == pytest.approx((x0 + x1) / 2)
 
-    def test_marker_reflects_fan_off_then_on(self, experience, qapp):
-        experience._begin_journey()
-        experience._start_observe()
-        for _ in range(6):
-            qapp.processEvents()
-        assert "OFF" in experience.overlay.fan_marker.text()
-        experience._on_explore_changed("fan", 2)
-        for _ in range(6):
-            qapp.processEvents()
-        assert "ON" in experience.overlay.fan_marker.text()
 
-    def test_marker_hidden_outside_watch_phases(self, experience, qapp):
-        experience._begin_journey()
-        for _ in range(6):
+class TestMascotMarginNeverOverlapsTheBox:
+    """The experiment box (room + flame/smoke) must shrink to fit above
+    a fixed-pixel strip reserved for the mascots (see PublicScene.
+    set_bottom_reserve_px/resizeEvent), not the other way around -- a
+    real, screenshotted complaint that the worker mascot overlapped the
+    flame instead of framing it. Checked at several window sizes: this
+    is a *fixed*-pixel reservation, not a proportional one, so only the
+    fraction of the canvas it maps to should change with window size,
+    never the mascots' own real footprint slipping above the axes'
+    shrunk bottom edge."""
+
+    @pytest.fixture
+    def experience(self, qapp):
+        sim = load_simulation_data()
+        if sim.is_demo:
+            pytest.skip("real dataset not present")
+        window = MainWindow(sim)
+        window.show()
+        window.enter_public_mode()
+        exp = window.public_experience
+        exp._begin_journey()
+        exp._start_observe()
+        exp.time_controller.pause()
+        yield exp
+        window.close()
+
+    @pytest.mark.parametrize("size", [(800, 600), (1024, 768), (1280, 800), (1920, 1080)])
+    def test_both_mascots_stay_at_or_below_the_axes_bottom_edge(self, experience, qapp, size):
+        # PublicExperience.window() is Qt's own accessor for its
+        # top-level window ancestor -- the MainWindow this fixture built.
+        experience.window().resize(*size)
+        for _ in range(10):
             qapp.processEvents()
-        assert experience.state.phase is Phase.INTRO
-        assert not experience.overlay.fan_marker.isVisible()
+        scene = experience.scene
+        overlay = experience.overlay
+        axes_bottom_px = scene.view.canvas.height() * (1 - scene._bottom_frac)
+        # A couple of px of float/rounding slack, not a real tolerance
+        # for overlap -- the mascots' own top edge is allowed to touch
+        # the boundary exactly (see PublicOverlay.mascot_band_height_px's
+        # own +12px clear-gap constant), not cross above it.
+        assert overlay.mascot.y() >= axes_bottom_px - 1.0
+        assert overlay.scientist.y() >= axes_bottom_px - 1.0
+
+    def test_reserve_is_derived_from_the_real_mascot_footprint_not_a_guess(self, experience):
+        expected = max(experience.overlay.mascot.height(),
+                       experience.overlay.scientist.height()) + 32 + 12
+        assert experience.scene._bottom_reserve_px == expected
+
+    def test_probe_at_roundtrips_through_the_shrunk_axes(self, experience):
+        """A tap fed back through widget_fraction_for's own output must
+        land back near the same physical point -- the two conversions
+        (data->widget, widget->data) have to agree on the same _bottom_
+        frac or a real tap anywhere in the lower part of the room would
+        silently mismap."""
+        scene = experience.scene
+        frac = scene.widget_fraction_for(0.9, 0.05)
+        assert frac is not None
+        canvas = scene.view.canvas
+        point = QtCore.QPoint(int(frac[0] * canvas.width()), int(frac[1] * canvas.height()))
+        result = scene.probe_at(point)
+        assert result is not None
+        x, z, _value = result
+        assert x == pytest.approx(0.9, abs=0.02)
+        assert z == pytest.approx(0.05, abs=0.02)
+
+    def test_a_tap_inside_the_reserved_mascot_strip_hits_nothing(self, experience):
+        scene = experience.scene
+        canvas = scene.view.canvas
+        # Comfortably inside the reserved strip, not right at its own
+        # boundary -- this checks "the reservation actually excludes
+        # taps", not the exact pixel the boundary falls on.
+        deep_in_margin = QtCore.QPoint(canvas.width() // 2, canvas.height() - 5)
+        assert scene.probe_at(deep_in_margin) is None
+
+
+class TestStatPanelGrouping:
+    """The language toggle, both meter chips, and the thermometer read
+    as one connected panel (Fire Explorer bug-fix round: 'these should
+    read as one panel, not three floating elements') -- checked as a
+    real geometric containment property, not just 'this widget exists'."""
+
+    @pytest.fixture
+    def experience(self, qapp):
+        sim = load_simulation_data()
+        if sim.is_demo:
+            pytest.skip("real dataset not present")
+        window = MainWindow(sim)
+        window.resize(1280, 800)
+        window.show()
+        window.enter_public_mode()
+        exp = window.public_experience
+        exp._begin_journey()
+        exp._start_observe()
+        for _ in range(8):
+            qapp.processEvents()
+        yield exp
+        window.close()
+
+    def test_language_toggle_meters_and_thermometer_all_sit_inside_the_panel(self, experience):
+        overlay = experience.overlay
+        panel = overlay.stat_panel.geometry()
+        for widget in (overlay.lang_en_button, overlay.lang_de_button,
+                       overlay.temperature_meter, overlay.airflow_meter, overlay.thermometer):
+            geo = widget.geometry()
+            assert panel.contains(geo), (widget, geo, panel)
+
+    def test_meters_row_sits_above_the_thermometer(self, experience):
+        overlay = experience.overlay
+        assert overlay.temperature_meter.geometry().bottom() < overlay.thermometer.y()
+        assert overlay.airflow_meter.geometry().bottom() < overlay.thermometer.y()
+
+    def test_language_row_sits_above_the_meters(self, experience):
+        overlay = experience.overlay
+        assert overlay.lang_en_button.geometry().bottom() < overlay.temperature_meter.y()
+
+    def test_hiding_meters_lets_the_thermometer_and_panel_ride_up(self, experience):
+        overlay = experience.overlay
+        before = overlay.stat_panel.height()
+        thermometer_y_before = overlay.thermometer.y()
+        overlay.set_meters_visible(False)
+        assert overlay.stat_panel.height() < before
+        assert overlay.thermometer.y() < thermometer_y_before
+
+
+class TestMeterChipCaptionEliding:
+    """A narrow flat MeterChip elides its (single, unbreakable-word)
+    caption rather than word-wrapping it -- word-wrap on a caption like
+    "LUFTTEMPERATUR" (no space to break at) fell back to an ugly
+    mid-word character split, a real, screenshotted regression this
+    exists to avoid. The longer, real-sentence phrase below it still
+    wraps normally -- not covered here, see MeterChip.heightForWidth's
+    own use in PublicOverlay._position_stat_group."""
+
+    def test_a_caption_wider_than_the_chip_is_elided_not_broken_mid_word(self, qapp):
+        from public.widgets import MeterChip
+        chip = MeterChip("LUFTTEMPERATUR", flat=True)
+        chip.resize(115, 150)
+        # Qt only dispatches resizeEvent to a widget once it's part of a
+        # real, shown window -- this standalone chip never is, so the
+        # real production trigger (MeterChip.resizeEvent) never fires
+        # here. Called directly instead, exercising exactly the same
+        # method a real resize would -- confirmed against the actual app
+        # separately (PublicOverlay's real, shown meter chips do elide
+        # correctly; see TestStatPanelGrouping).
+        chip._update_caption_elide()
+        text = chip._caption.text()
+        assert text != "LUFTTEMPERATUR"   # too wide at this width; must not show unelided
+        assert "…" in text            # ellipsis, not a hard mid-word cut
+        assert text.rstrip("…") == "LUFTTEMPERATUR"[:len(text.rstrip("…"))]
+
+    def test_full_caption_is_still_available_for_accessibility_and_language_switch(self, qapp):
+        from public.widgets import MeterChip
+        chip = MeterChip("LUFTTEMPERATUR", flat=True)
+        chip.resize(115, 150)
+        assert chip._caption_full_text == "LUFTTEMPERATUR"
+        chip.set_caption("AIR TEMPERATURE")
+        assert chip._caption_full_text == "AIR TEMPERATURE"
+
+    def test_a_short_caption_is_not_elided(self, qapp):
+        from public.widgets import MeterChip
+        chip = MeterChip("AIR", flat=True)
+        chip.resize(115, 150)
+        assert chip._caption.text() == "AIR"
+
+    def test_non_flat_chip_never_elides(self, qapp):
+        """The un-flat, original 210px-floor MeterChip is still used
+        elsewhere in the app (or could be) -- its caption must keep
+        behaving exactly as before this whole panel existed."""
+        from public.widgets import MeterChip
+        chip = MeterChip("LUFTTEMPERATUR", flat=False)
+        chip.resize(115, 150)
+        assert chip._caption.text() == "LUFTTEMPERATUR"
+
+
+class TestControlBarPolish:
+    """Fire Explorer bug-fix round: control-bar spacing/sizing/grouping
+    polish. Covers a real, measured bug this round found and fixed --
+    the control bar and the stat panel used to be positioned by two
+    unrelated formulas (one anchored to a physical-geometry fraction of
+    the window width, one a fixed right-margin reservation) that agreed
+    at 800x600 but diverged as the window widened, actually overlapping
+    by measured 73px at 1280 and 265px at 1920 -- not present at the one
+    size ad hoc manual testing happened to use."""
+
+    @pytest.fixture
+    def experience(self, qapp):
+        sim = load_simulation_data()
+        if sim.is_demo:
+            pytest.skip("real dataset not present")
+        window = MainWindow(sim)
+        window.show()
+        window.enter_public_mode()
+        exp = window.public_experience
+        exp._begin_journey()
+        exp._start_observe()
+        for _ in range(10):
+            qapp.processEvents()
+        yield exp
+        window.close()
+
+    @pytest.mark.parametrize("size", [(800, 600), (1024, 768), (1280, 800), (1920, 1080)])
+    def test_explore_panel_never_overlaps_the_stat_panel(self, experience, qapp, size):
+        experience.window().resize(*size)
+        for _ in range(15):
+            qapp.processEvents()
+        overlay = experience.overlay
+        # A real, visible gap, not just "not touching" -- the whole
+        # point of the fix (see this class' own docstring) was that a
+        # merely-non-negative gap still read as "about to collide".
+        assert overlay.stat_panel.x() - overlay.explore_panel.geometry().right() >= 20
+
+    def test_each_group_has_a_divider_before_it_except_the_first(self, experience):
+        overlay = experience.overlay
+        assert len(overlay._explore_dividers) == len(overlay._explore_toggles) - 1
+
+    def test_dividers_span_the_full_toggle_height_not_just_the_button_row(self, experience):
+        overlay = experience.overlay
+        toggle_height = next(iter(overlay._explore_toggles.values())).height()
+        for divider in overlay._explore_dividers:
+            assert divider.height() == toggle_height
+
+    def test_dividers_sit_strictly_between_two_consecutive_groups(self, experience):
+        overlay = experience.overlay
+        toggles = list(overlay._explore_toggles.values())
+        for divider, left_toggle, right_toggle in zip(
+                overlay._explore_dividers, toggles, toggles[1:]):
+            assert left_toggle.geometry().right() < divider.x()
+            assert divider.geometry().right() < right_toggle.x()
+
+    def test_every_button_in_every_group_and_state_is_exactly_the_same_height(self, experience):
+        heights = set()
+        for toggle in experience.overlay._explore_toggles.values():
+            for i in range(len(toggle._values)):
+                heights.add(toggle._group.button(i).height())
+        assert len(heights) == 1, f"button heights are not uniform: {heights}"
+
+    def test_caption_to_button_row_gap_is_a_real_gap_not_nearly_touching(self, experience):
+        for toggle in experience.overlay._explore_toggles.values():
+            caption = toggle.findChild(QtWidgets.QLabel)
+            first_button = toggle._group.button(0)
+            gap = first_button.geometry().y() - caption.geometry().bottom()
+            assert gap >= 8, f"{toggle}: caption-to-row gap only {gap}px"
+
+    def test_panel_background_shrink_wraps_the_buttons_when_there_is_room_to_spare(
+            self, experience, qapp):
+        """explore_panel used to be stretched to root's *entire* available
+        row width regardless of how much of it the actual buttons needed
+        -- a real, screenshotted "the bar is enveloping a huge stretch of
+        empty background" complaint at any window wide enough to have
+        slack to give. At a genuinely wide window the panel's own painted
+        width must match its content's real sizeHint, not the window's."""
+        experience.window().resize(1712, 1192)
+        for _ in range(15):
+            qapp.processEvents()
+        overlay = experience.overlay
+        assert overlay.explore_panel.width() == overlay.explore_panel.sizeHint().width()
+
+    def test_panel_still_shrinks_toward_its_buttons_own_floor_when_the_window_is_narrow(
+            self, experience, qapp):
+        """The shrink-wrap fix must not turn into a fixed width that
+        overflows a narrow window -- at 800x600 there genuinely isn't
+        room for the panel's full preferred width, and it has to keep
+        compressing toward each button's own 52px floor the same way it
+        already did before this fix, not overflow past the window edge."""
+        experience.window().resize(800, 600)
+        for _ in range(15):
+            qapp.processEvents()
+        overlay = experience.overlay
+        assert overlay.explore_panel.width() < overlay.explore_panel.sizeHint().width()
+        assert overlay.explore_panel.geometry().right() < overlay.width()
 
 
 class TestPlayPauseControl:
@@ -3543,7 +3972,7 @@ class TestTemperatureBandEmoji:
     def test_hot_bands_use_expressive_emoji(self):
         assert kid.temperature_icon(25.0) == "🧊"
         assert kid.temperature_icon(350.0) == "🌋"
-        assert kid.temperature_icon(500.0) == "🔥"
+        assert kid.temperature_icon(500.0) == "🕯️"
 
     def test_color_and_icon_share_the_same_band_boundaries(self):
         """temperature_color's band edges must exactly match
@@ -3695,7 +4124,7 @@ class TestExploreCompare:
         experience._start_observe()
         experience._enter_game_compare()
         assert not any("What changed" in t for t in self._button_texts(experience))
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         assert any("What changed" in t for t in self._button_texts(experience))
 
     def test_compare_uses_real_measured_values(self, experience, sim_data):
@@ -3704,7 +4133,7 @@ class TestExploreCompare:
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_compare()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
 
         baseline_case = experience.state.baseline_case_index
         contrast_case = experience.state.case_index
@@ -3737,7 +4166,7 @@ class TestExploreCompare:
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_compare()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         experience.time_controller.seek(70)
         experience.time_controller.pause()
 
@@ -3751,14 +4180,14 @@ class TestExploreCompare:
         assert experience.time_controller.index >= 70
         # The toggle UI must still show "Fan ON" -- closing the detour
         # must not silently revert the child's own explore choice.
-        fan_toggle = experience.overlay._explore_toggles["fan"]
-        assert fan_toggle._group.checkedId() == 1
+        fan_toggle = experience.overlay._explore_toggles["vent1"]
+        assert fan_toggle._group.checkedId() == 2   # "FAN ON", the 3rd of 3 real vod options
 
     def test_compare_pauses_and_resumes_playback(self, experience):
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_compare()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         assert experience.time_controller.is_playing()
 
         experience._on_compare_requested()
@@ -3771,7 +4200,7 @@ class TestExploreCompare:
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_compare()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         experience._on_compare_requested()
         experience._close_compare()
         assert experience.state.choice is None
@@ -4004,14 +4433,14 @@ class TestComparePlace:
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_compare()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         assert any("Compare this place" in t for t in self._button_texts(experience))
 
     def test_uses_real_measured_values_at_the_same_point(self, experience, qapp):
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_compare()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         for _ in range(6):
             qapp.processEvents()
         canvas = experience.scene.view.canvas
@@ -4034,7 +4463,7 @@ class TestComparePlace:
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_compare()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         current = experience.state.case_index
         canvas = experience.scene.view.canvas
         experience._on_compare_place_requested()
@@ -4047,8 +4476,8 @@ class TestComparePlace:
         assert experience.state.phase is Phase.GAME_PLAY
         assert experience._active_game == "compare"
         assert experience.state.case_index == current
-        fan_toggle = experience.overlay._explore_toggles["fan"]
-        assert fan_toggle._group.checkedId() == 1
+        fan_toggle = experience.overlay._explore_toggles["vent1"]
+        assert fan_toggle._group.checkedId() == 2   # "FAN ON", the 3rd of 3 real vod options
 
 
 class TestSamePlaceVerdict:
@@ -4076,7 +4505,7 @@ class TestSamePlaceVerdict:
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_compare()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         for _ in range(6):
             qapp.processEvents()
         canvas = experience.scene.view.canvas
@@ -4164,7 +4593,7 @@ class TestHottestPointDetection:
 class TestVentTap:
     """The vent is now a real tappable object in the scene (Phase 3
     section 1/2), not just an external toggle -- tapping it flips the
-    exact same "fan" explore control a real button click would."""
+    exact same "vent1" explore control a real button click would."""
 
     @pytest.fixture
     def experience(self, qapp):
@@ -4209,8 +4638,11 @@ class TestVentTap:
         assert after != before
         entry = next(e for e in experience.sim_data.manifest if e.case_index == after)
         assert entry.vod == 2
-        fan_toggle = experience.overlay._explore_toggles["fan"]
-        assert fan_toggle._group.checkedId() == 1
+        fan_toggle = experience.overlay._explore_toggles["vent1"]
+        # Index 2: Vent 1 now has three real options (open/closed/HVAC
+        # fan, in that declaration order) -- fan on is the third, not
+        # the second as when this control only had two.
+        assert fan_toggle._group.checkedId() == 2
 
     def test_tapping_it_again_toggles_back_off(self, experience):
         experience._begin_journey()
@@ -4265,10 +4697,16 @@ class TestVentTap:
 
 
 class TestVentActivityGlow:
-    """Phase 12 section 2: a continuous "this thing is doing something"
-    cue while the fan is ON, driven every frame by the real per-frame
-    velocity magnitude -- never a direction this dataset can't support.
-    Quiet (no patch at all) while OFF."""
+    """Phase 12 section 2 (generalized to both real vents per later
+    supervisor feedback: the same "air can move here" animation --
+    housing + spinning blades + activity glow -- for Vent 1 and Vent 2,
+    not a powered fan for one and a static flap for the other). A
+    continuous "this thing is doing something" cue while a vent is
+    *open*, driven every frame by the real per-frame velocity magnitude
+    -- never a direction this dataset can't support. Quiet (no patch at
+    all) while closed. Vent 1/vod has three real states (open/closed/
+    HVAC fan) -- both open (0) and fan-on (2) count as "open" here, only
+    closed (1) is quiet. Vent 2/voc has just open (0) / closed (1)."""
 
     @pytest.fixture
     def experience(self, qapp):
@@ -4284,30 +4722,70 @@ class TestVentActivityGlow:
         yield window.public_experience
         window.close()
 
-    def test_no_patch_while_fan_is_off(self, experience):
+    def test_no_patch_while_vent1_is_closed(self, experience):
         experience._begin_journey()
         experience._start_observe()
-        assert experience.scene._vent_activity_patch is None
+        experience._on_explore_changed("vent1", 1)
+        assert experience.scene._vent1.activity_patch is None
 
-    def test_patch_appears_at_the_real_vent_position_when_fan_turns_on(self, experience):
+    def test_patch_appears_at_the_real_vent_position_when_vent1_is_plain_open(self, experience):
+        """vod=0 (open, no motor) is still "open" now, not the old
+        control's collapsed "off" -- see EXPLORE_CONTROLS' own comment
+        on why the old binary fan control skipped this state."""
+        experience._begin_journey()
+        experience._start_observe()
+        vent_xz = experience.scene.vent_marker_position(experience.state.case_index)
+        experience._on_explore_changed("vent1", 1)   # closed first, so 0 is a real change
+        experience._on_explore_changed("vent1", 0)
+
+        assert experience.scene._vent1.activity_patch is not None
+        assert experience.scene._vent1.activity_patch.center == pytest.approx(vent_xz)
+
+    def test_patch_appears_at_the_real_vent_position_when_vent1_fan_turns_on(self, experience):
         experience._begin_journey()
         experience._start_observe()
         vent_xz = experience.scene.vent_marker_position(experience.state.case_index)
 
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
 
-        assert experience.scene._vent_activity_patch is not None
-        assert experience.scene._vent_activity_patch.center == pytest.approx(vent_xz)
+        assert experience.scene._vent1.activity_patch is not None
+        assert experience.scene._vent1.activity_patch.center == pytest.approx(vent_xz)
 
-    def test_patch_disappears_when_fan_turns_back_off(self, experience):
+    def test_patch_disappears_when_vent1_closes(self, experience):
         experience._begin_journey()
         experience._start_observe()
-        experience._on_explore_changed("fan", 2)
-        assert experience.scene._vent_activity_patch is not None
+        experience._on_explore_changed("vent1", 2)
+        assert experience.scene._vent1.activity_patch is not None
 
-        experience._on_explore_changed("fan", 0)
+        experience._on_explore_changed("vent1", 1)
 
-        assert experience.scene._vent_activity_patch is None
+        assert experience.scene._vent1.activity_patch is None
+
+    def test_no_patch_while_vent2_is_closed(self, experience):
+        experience._begin_journey()
+        experience._start_observe()
+        experience._on_explore_changed("vent2", 1)
+        assert experience.scene._vent2.activity_patch is None
+
+    def test_patch_appears_at_the_real_vent2_position_when_open(self, experience):
+        experience._begin_journey()
+        experience._start_observe()
+        vent2_xz = experience.scene.vent2_marker_position(experience.state.case_index)
+        experience._on_explore_changed("vent2", 1)   # closed first, so 0 is a real change
+        experience._on_explore_changed("vent2", 0)
+
+        assert experience.scene._vent2.activity_patch is not None
+        assert experience.scene._vent2.activity_patch.center == pytest.approx(vent2_xz)
+
+    def test_patch_disappears_when_vent2_closes(self, experience):
+        experience._begin_journey()
+        experience._start_observe()
+        experience._on_explore_changed("vent2", 0)
+        assert experience.scene._vent2.activity_patch is not None
+
+        experience._on_explore_changed("vent2", 1)
+
+        assert experience.scene._vent2.activity_patch is None
 
     def test_radius_and_alpha_track_the_real_frame_velocity(self, experience):
         """Never a fabricated animation -- the exact per-frame velocity
@@ -4315,28 +4793,31 @@ class TestVentActivityGlow:
         nothing else."""
         experience._begin_journey()
         experience._start_observe()
-        experience._on_explore_changed("fan", 2)
-        base_r = experience.scene._vent_activity_base_r
+        experience._on_explore_changed("vent1", 2)
+        base_r = experience.scene._vent1.activity_base_r
 
         still_vel = np.zeros_like(experience.scene._velocity[0])
-        experience.scene._jitter_vent_activity(0, still_vel)
-        quiet_alpha = experience.scene._vent_activity_patch.get_alpha()
+        experience.scene._animate_vent(experience.scene._vent1, 0, still_vel)
+        quiet_alpha = experience.scene._vent1.activity_patch.get_alpha()
 
         moving_vel = np.full_like(experience.scene._velocity[0], 1.0)
-        experience.scene._jitter_vent_activity(0, moving_vel)
-        active_alpha = experience.scene._vent_activity_patch.get_alpha()
+        experience.scene._animate_vent(experience.scene._vent1, 0, moving_vel)
+        active_alpha = experience.scene._vent1.activity_patch.get_alpha()
 
         assert active_alpha > quiet_alpha
-        assert experience.scene._vent_activity_patch.get_radius() >= base_r
+        assert experience.scene._vent1.activity_patch.get_radius() >= base_r
 
 
-class TestFanRowVisibility:
-    """fan_row now holds only fan_marker -- the candle-count marker that
-    used to share it was removed (see PublicOverlay._update_fan_row_
-    visibility): the count is already legible both in the scene itself,
-    drawn candle-by-candle, and in the Candles toggle's own checked
-    state, so a third copy of the same fact was crowding this corner of
-    the screen (a real, screenshotted complaint) for nothing new."""
+class TestDoorVisibility:
+    """The door's real state (narrow/wide, i.e. door=0/1) always did
+    update room_door's own segment data correctly -- confirmed by
+    inspecting PublicScene._room_outline_for's output directly -- but at
+    the original line weight (2.6px, the same order as the dashed wall
+    outline it sits inside of) the change was not legible as "a door" in
+    an actual 800x600 screenshot: toggling NARROW/WIDE produced no
+    perceptible change. Fixed by weighting the door line at least as
+    heavily as the vents' own lines (views._ROOM_VENT_LW), not by
+    touching the geometry, which was never wrong."""
 
     @pytest.fixture
     def experience(self, qapp):
@@ -4352,19 +4833,29 @@ class TestFanRowVisibility:
         yield window.public_experience
         window.close()
 
-    def test_shown_while_the_fan_marker_has_something_to_anchor(self, experience):
+    def test_door_line_is_at_least_as_bold_as_the_vents(self):
+        from views import _ROOM_DOOR_LW, _ROOM_VENT_LW, _ROOM_WALL_LW
+        assert _ROOM_DOOR_LW >= _ROOM_VENT_LW
+        assert _ROOM_DOOR_LW > _ROOM_WALL_LW
+
+    def test_door_segment_length_actually_changes_between_narrow_and_wide(self, experience):
         experience._begin_journey()
         experience._start_observe()
-        assert not experience.overlay.fan_row.isHidden()
-        assert not experience.overlay.fan_marker.isHidden()
 
-    def test_hidden_once_the_fan_marker_is_cleared(self, experience):
-        experience._begin_journey()
-        experience._start_observe()
+        def door_span():
+            geometry = experience.scene._room_outline_for(experience.state.case_index)
+            dx0, dz0, dx1, dz1 = geometry["door"]
+            return abs(dz1 - dz0)
 
-        experience.overlay.set_fan_marker(None, False)
+        experience._on_explore_changed("door", 0)
+        narrow_span = door_span()
+        experience._on_explore_changed("door", 1)
+        wide_span = door_span()
 
-        assert experience.overlay.fan_row.isHidden()
+        assert wide_span > narrow_span
+        # The real generator values (fds/generate_sim.py: door = [0.050,
+        # 0.150]) -- not assumed close, an actual >2x difference.
+        assert wide_span >= narrow_span * 2
 
 
 class TestIdleVentHint:
@@ -4405,7 +4896,7 @@ class TestIdleVentHint:
         experience._begin_journey()
         experience._start_observe()
 
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
 
         assert not experience._idle_vent_timer.isActive()
 
@@ -4438,13 +4929,12 @@ class TestIdleVentHint:
 class TestFanStateConsistency:
     """Phase 9 section 10: every widget that shows the fan's state must
     agree with the actually-loaded scenario -- the toggle, the vent's own
-    drawn line color, the floating fan marker label, and (once its
-    340 ms before/after sweep finishes) the comparison card's embedded
-    thermometer caption. A prior report flagged an apparent mismatch;
-    investigating it here found no real bug -- it was that animation
-    caught mid-flight by a screenshot taken before the sweep finished.
-    This test locks in the real invariant so a future regression would
-    be caught."""
+    drawn line color, and (once its 340 ms before/after sweep finishes)
+    the comparison card's embedded thermometer caption. A prior report
+    flagged an apparent mismatch; investigating it here found no real
+    bug -- it was that animation caught mid-flight by a screenshot taken
+    before the sweep finished. This test locks in the real invariant so
+    a future regression would be caught."""
 
     @pytest.fixture
     def experience(self, qapp):
@@ -4479,9 +4969,8 @@ class TestFanStateConsistency:
     def _assert_consistent(self, experience, expect_on: bool):
         entry = experience.scene.current_entry()
         assert (entry.vod == 2) == expect_on
-        fan_toggle = experience.overlay._explore_toggles["fan"]
-        assert (fan_toggle._group.checkedId() == 1) == expect_on
-        assert ("ON" in experience.overlay.fan_marker.text()) == expect_on
+        fan_toggle = experience.overlay._explore_toggles["vent1"]
+        assert (fan_toggle._group.checkedId() == 2) == expect_on   # "HVAC" is the 3rd of 3 real vod options
         vent_state = "HVAC" if expect_on else "open"
         from views import _VENT_STATE_COLORS
         import matplotlib.colors as mcolors
@@ -4502,7 +4991,7 @@ class TestFanStateConsistency:
         # actual press, before the signal handler ever runs, so driving
         # it any other way would never exercise "does the toggle's own
         # visual state agree", the exact thing this test checks.
-        experience.overlay._explore_toggles["fan"]._group.button(1).click()
+        experience.overlay._explore_toggles["vent1"]._group.button(2).click()   # "HVAC"
         for _ in range(6):
             qapp.processEvents()
         self._assert_consistent(experience, expect_on=True)
@@ -4521,7 +5010,7 @@ class TestFanStateConsistency:
         experience._enter_game_map()
         ceiling_pos = self._pos_for(experience, 0.75, ROOM_Z[1] - 0.01)
         experience._on_overlay_tapped(ceiling_pos)
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         for _ in range(20):
             experience.time_controller.seek(experience.time_controller.index + 1)
         experience.time_controller.pause()
@@ -4531,7 +5020,7 @@ class TestFanStateConsistency:
         QtCore.QTimer.singleShot(500, loop.quit)   # past the 340ms sweep
         loop.exec_()
 
-        assert "Fan ON" in experience.overlay.thermometer._caption.text()
+        assert "HVAC" in experience.overlay.thermometer._caption.text()   # "Vent 1 HVAC"
         entry = experience.scene.current_entry()
         assert entry.vod == 2
 
@@ -4616,7 +5105,7 @@ class TestHotColdDualMarkers:
         experience._on_overlay_tapped(QtCore.QPoint(10, 10))
         assert len(experience.scene._hot_marker.get_offsets()) == 1
 
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         assert len(experience.scene._hot_marker.get_offsets()) == 0
         assert len(experience.scene._cool_marker.get_offsets()) == 0
 
@@ -4688,7 +5177,7 @@ class TestDeferredSweepGenerationSafety:
         experience._start_observe()
         experience._enter_game_compare()
         canvas = experience.scene.view.canvas
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
 
         experience._on_compare_place_requested()
         centre = QtCore.QPoint(canvas.width() // 2, canvas.height() // 2)
@@ -4719,7 +5208,7 @@ class TestDeferredSweepGenerationSafety:
         experience._start_observe()
         gen0 = experience._interaction_generation
 
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         gen1 = experience._interaction_generation
         assert gen1 != gen0
 
@@ -4739,7 +5228,7 @@ class TestDeferredSweepGenerationSafety:
         experience._start_observe()
         experience._enter_game_compare()
         canvas = experience.scene.view.canvas
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
 
         experience._on_compare_place_requested()
         centre = QtCore.QPoint(canvas.width() // 2, canvas.height() // 2)
@@ -4912,7 +5401,7 @@ class TestMysteryExperiment:
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_mystery()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         for _ in range(20):
             experience.time_controller.seek(experience.time_controller.index + 1)
         experience.time_controller.pause()
@@ -4964,7 +5453,7 @@ class TestMysteryExperiment:
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_mystery()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         for _ in range(20):
             experience.time_controller.seek(experience.time_controller.index + 1)
         experience.time_controller.pause()
@@ -4997,7 +5486,7 @@ class TestMysteryExperiment:
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_compare()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         for _ in range(20):
             experience.time_controller.seek(experience.time_controller.index + 1)
         experience.time_controller.pause()
@@ -5010,7 +5499,7 @@ class TestMysteryExperiment:
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_mystery()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         for _ in range(20):
             experience.time_controller.seek(experience.time_controller.index + 1)
         experience.time_controller.pause()
@@ -5126,13 +5615,37 @@ class TestTemperatureTrail:
     def _button_texts(experience):
         return [b.text() for b in experience.overlay._buttons + experience.overlay._nav_buttons]
 
+    @staticmethod
+    def _safe_point(experience, x_frac=0.75, y_frac=0.75):
+        """A tap point at (x_frac, y_frac) of the way across/down the
+        *axes' own real bounds*, not the raw canvas -- both
+        SCENE_WIDTH_FRAC (horizontal, the reserved thermometer column)
+        and the scene's own _bottom_frac (vertical, the reserved mascot
+        strip below the room -- see PublicScene.set_bottom_reserve_px)
+        shrink the real plotted area below the raw canvas size, so "3/4
+        of the way down the canvas" can land inside that reserved strip
+        instead of on the scene. Scaled against the axes' *own* current
+        bounds instead of a bare canvas fraction so this stays correct
+        regardless of window size or how large either reserved strip is.
+        Defaults match the "far corner" point most of this class' tests
+        already wanted."""
+        canvas = experience.scene.view.canvas
+        axes_h_frac = 1.0 - experience.scene._bottom_frac
+        return QtCore.QPoint(
+            int(canvas.width() * SCENE_WIDTH_FRAC * x_frac),
+            int(canvas.height() * axes_h_frac * y_frac))
+
+    @classmethod
+    def _far_point(cls, experience):
+        return cls._safe_point(experience)
+
     def test_plain_taps_accumulate_real_points(self, experience, qapp):
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_map()
         canvas = experience.scene.view.canvas
         first = QtCore.QPoint(canvas.width() // 4, canvas.height() // 4)
-        second = QtCore.QPoint(int(3 * canvas.width() * SCENE_WIDTH_FRAC // 4), 3 * canvas.height() // 4)
+        second = self._far_point(experience)
         x1, z1, v1 = experience.scene.probe_at(first)
         experience._on_overlay_tapped(first)
         x2, z2, v2 = experience.scene.probe_at(second)
@@ -5150,12 +5663,11 @@ class TestTemperatureTrail:
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_map()
-        canvas = experience.scene.view.canvas
-        first = QtCore.QPoint(int(3 * canvas.width() * SCENE_WIDTH_FRAC // 4), canvas.height() // 4)
+        first = self._safe_point(experience, x_frac=0.75, y_frac=0.25)
         experience._on_overlay_tapped(first)
         assert experience.scene._trail_line is None   # one point: nothing to join yet
 
-        second = QtCore.QPoint(canvas.width() // 4, 3 * canvas.height() // 4)
+        second = self._safe_point(experience, x_frac=0.25, y_frac=0.75)
         experience._on_overlay_tapped(second)
 
         xs, zs = experience.scene._trail_line.get_data()
@@ -5168,8 +5680,7 @@ class TestTemperatureTrail:
         experience._enter_game_map()
         canvas = experience.scene.view.canvas
         experience._on_overlay_tapped(QtCore.QPoint(canvas.width() // 4, canvas.height() // 4))
-        experience._on_overlay_tapped(
-            QtCore.QPoint(int(3 * canvas.width() * SCENE_WIDTH_FRAC // 4), 3 * canvas.height() // 4))
+        experience._on_overlay_tapped(self._safe_point(experience))
         assert experience.scene._trail_line is not None
 
         experience._on_clear_trail_requested()
@@ -5187,12 +5698,12 @@ class TestTemperatureTrail:
         experience._enter_game_map()
         canvas = experience.scene.view.canvas
         experience._on_overlay_tapped(QtCore.QPoint(canvas.width() // 4, canvas.height() // 4))
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         for _ in range(6):
             qapp.processEvents()
         assert experience._before_trail
 
-        far = QtCore.QPoint(int(3 * canvas.width() * SCENE_WIDTH_FRAC // 4), 3 * canvas.height() // 4)
+        far = self._safe_point(experience)
         experience._on_overlay_tapped(far)
 
         # Only one *current* point exists post-switch -- the before point
@@ -5238,7 +5749,7 @@ class TestTemperatureTrail:
         experience._on_overlay_tapped(QtCore.QPoint(canvas.width() // 2, canvas.height() // 2))
         assert experience._temp_trail
 
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
 
         assert experience._temp_trail == []
         assert experience._before_trail
@@ -5261,7 +5772,7 @@ class TestTemperatureTrail:
         experience._on_overlay_tapped(centre)
         assert experience._temp_trail
 
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         for _ in range(6):
             qapp.processEvents()
         assert experience._before_trail
@@ -5281,12 +5792,12 @@ class TestTemperatureTrail:
         canvas = experience.scene.view.canvas
         experience._on_overlay_tapped(
             QtCore.QPoint(canvas.width() // 4, canvas.height() // 4))
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         for _ in range(6):
             qapp.processEvents()
         assert experience._before_trail
 
-        far = QtCore.QPoint(int(3 * canvas.width() * SCENE_WIDTH_FRAC // 4), 3 * canvas.height() // 4)
+        far = self._safe_point(experience)
         experience._on_overlay_tapped(far)
 
         assert not experience._compare_open
@@ -5299,12 +5810,12 @@ class TestTemperatureTrail:
         canvas = experience.scene.view.canvas
         experience._on_overlay_tapped(
             QtCore.QPoint(canvas.width() // 4, canvas.height() // 4))
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         for _ in range(6):
             qapp.processEvents()
         assert len(experience._before_trail) == 1
 
-        far = QtCore.QPoint(int(3 * canvas.width() * SCENE_WIDTH_FRAC // 4), 3 * canvas.height() // 4)
+        far = self._safe_point(experience)
         experience._on_overlay_tapped(far)
 
         labels = [label.get_text() for _marker, label in experience.scene._trail_markers]
@@ -5316,7 +5827,7 @@ class TestTemperatureTrail:
         experience._enter_game_map()
         canvas = experience.scene.view.canvas
         experience._on_overlay_tapped(QtCore.QPoint(canvas.width() // 2, canvas.height() // 2))
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         for _ in range(6):
             qapp.processEvents()
         assert experience._before_trail
@@ -5336,7 +5847,7 @@ class TestTemperatureTrail:
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_map()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         canvas = experience.scene.view.canvas
         experience._on_overlay_tapped(QtCore.QPoint(canvas.width() // 2, canvas.height() // 2))
         assert experience._temp_trail
@@ -5389,7 +5900,7 @@ class TestBaselineGhost:
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_compare()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         assert any("Show before" in t for t in self._button_texts(experience))
 
         experience._on_ghost_toggle_requested()
@@ -5404,7 +5915,7 @@ class TestBaselineGhost:
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_compare()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         experience._on_ghost_toggle_requested()
         assert experience._ghost_visible
 
@@ -5443,15 +5954,15 @@ class TestExperimentBoard:
     def test_last_change_tracked_from_a_real_explore_toggle(self, experience):
         experience._begin_journey()
         experience._start_observe()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         assert experience._last_change is not None
-        assert "fan" in experience._last_change.lower() or "on" in experience._last_change.lower()
+        assert "hvac" in experience._last_change.lower()
 
     def test_last_watched_tracked_from_a_real_comparison(self, experience):
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_compare()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         experience._on_compare_requested()
         assert experience._last_watched is not None
 
@@ -5459,7 +5970,7 @@ class TestExperimentBoard:
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_compare()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         experience._on_compare_requested()
         experience._close_compare()
         # The notebook only opens once there's a real discovery in it --
@@ -5483,7 +5994,7 @@ class TestExperimentBoard:
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_compare()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         experience._on_compare_requested()   # would normally set _last_watched
         experience._close_compare()
         experience._record_discovery("🎉", "TEST DISCOVERY", "text")
@@ -5539,7 +6050,7 @@ class TestTrailAndGhostPersistAcrossDetours:
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_map()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         self._tap_trail_point(experience)
         assert len(experience._temp_trail) == 1
 
@@ -5553,7 +6064,7 @@ class TestTrailAndGhostPersistAcrossDetours:
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_map()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         self._tap_trail_point(experience)
         experience._record_discovery("🔥", "TEST", "text")
 
@@ -5567,7 +6078,7 @@ class TestTrailAndGhostPersistAcrossDetours:
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_compare()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         experience._on_ghost_toggle_requested()
         assert experience._ghost_visible
 
@@ -5586,7 +6097,7 @@ class TestTrailAndGhostPersistAcrossDetours:
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_map()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         self._tap_trail_point(experience)
         assert experience._temp_trail
 
@@ -5604,7 +6115,7 @@ class TestTrailAndGhostPersistAcrossDetours:
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_compare()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         experience._on_ghost_toggle_requested()
         assert experience._ghost_visible
 
@@ -5617,7 +6128,7 @@ class TestTrailAndGhostPersistAcrossDetours:
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_map()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         self._tap_trail_point(experience)
 
         experience.time_controller.pause()
@@ -5626,7 +6137,7 @@ class TestTrailAndGhostPersistAcrossDetours:
         assert experience._temp_trail == []
 
         experience._enter_game_compare()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         experience._on_ghost_toggle_requested()
         assert experience._ghost_visible
 
@@ -5660,7 +6171,7 @@ class TestWhyButton:
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_compare()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
 
         experience._on_compare_requested()
 
@@ -5677,7 +6188,7 @@ class TestWhyButton:
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_compare()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         canvas = experience.scene.view.canvas
 
         experience._on_compare_place_requested()
@@ -5701,7 +6212,7 @@ class TestWhyButton:
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_mystery()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         experience._on_overlay_tapped(pos_for(0.75, ROOM_Z[1] - 0.01))
         experience._close_compare()
 
@@ -5715,7 +6226,7 @@ class TestWhyButton:
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_compare()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         canvas = experience.scene.view.canvas
         experience._on_compare_place_requested()
         # Tap the exact same point twice at the baseline vs baseline --
@@ -5895,7 +6406,7 @@ class TestGamesHub:
         experience._begin_journey()
         experience._start_observe()
         experience._enter_game_compare()
-        experience._on_explore_changed("fan", 2)
+        experience._on_explore_changed("vent1", 2)
         experience._on_compare_place_requested()
         canvas = experience.scene.view.canvas
         centre = QtCore.QPoint(canvas.width() // 2, canvas.height() // 2)
@@ -5914,20 +6425,36 @@ class TestGamesHub:
 
 
 class TestScientistFactBubble:
-    """Dr. Funke: a second, distinct mascot standing in the instrument
-    sidebar, sharing general fire-science facts on her own ambient
-    timer (never pull-triggered, and never routed through the primary
-    Mascot/SpeechBubble the child talks to directly -- see
-    PublicOverlay.say_fact's own docstring). Geometry here matters more
-    than most: a first version of her sidebar spot shrank the
-    thermometer to make room and silently lost the tube, bulb and
-    readout below a real rendering floor in Thermometer._paint_tube;
-    the fix moved her above the thermometer instead, in the sidebar's
-    otherwise-empty strip between the language toggle and the
-    thermometer's own top edge -- and a follow-up screenshot caught the
-    (longer, compound-word) German facts overlapping that same edge
-    until ThoughtBubble.fit_to started shrinking its own font to
-    guarantee a fit. These tests pin both fixes."""
+    """Dr. Funke: a second, distinct mascot now standing in the true
+    bottom-left corner (see PublicOverlay._position_scientist and the
+    class-level swap note in PublicOverlay.__init__ -- she used to stand
+    in the instrument sidebar's lower-right pocket, below the
+    thermometer, until that spot's crowding risk moved her here and gave
+    it to the worker mascot instead), sharing general fire-science facts
+    in her own SpeechBubble instance (see PublicOverlay.scientist_bubble
+    -- the same widget class the primary mascot uses, not a separate
+    bubble type) on a slow, ambient timer. Never pull-triggered, and --
+    the part that actually makes this ambient rather than a second
+    competing character -- never allowed to appear while the primary
+    guide has spoken recently or the child has just interacted (see
+    _is_a_lull); the two are never both up at once, in either direction
+    (PublicOverlay.say cuts off an already-showing fact the instant the
+    buddy has something fresh to say, on top of _show_next_fact refusing
+    to start a new one near one).
+
+    Geometry here matters too, historically: a first version of her old
+    sidebar spot shrank the thermometer to make room and silently lost
+    the tube, bulb and readout below a real rendering floor in
+    Thermometer._paint_tube; the fix (still in place, reserving room via
+    PublicOverlay._BOTTOM_RIGHT_RESERVE_PX for whichever mascot now
+    stands in that corner) used whatever the thermometer leaves there
+    rather than shrinking it. A follow-up screenshot then caught the
+    (longer, compound-word) German facts overlapping that pocket's own
+    edge until SpeechBubble.fit_to started shrinking its own font to
+    guarantee a fit -- the same fix ThoughtBubble (the widget this
+    replaced) needed for the same reason. The font-shrink invariant
+    itself (never clip, whichever corner/bubble it's checked against)
+    outlived the corner she was in when it was written."""
 
     @pytest.fixture
     def experience(self, qapp):
@@ -5943,6 +6470,16 @@ class TestScientistFactBubble:
         yield window.public_experience
         window.close()
         i18n.set_language("en")
+
+    @staticmethod
+    def _force_lull(experience):
+        """Push both of _is_a_lull's own timestamps far enough into the
+        past that it reads True -- the state _show_next_fact needs
+        before it will actually show anything. 0.0, matching the same
+        "long ago, no sentinel needed" idiom _last_say_at/
+        _last_interaction_at themselves use at init."""
+        experience.overlay._last_say_at = 0.0
+        experience._last_interaction_at = 0.0
 
     def test_hidden_outside_observe(self, experience):
         experience._begin_journey()
@@ -5962,11 +6499,11 @@ class TestScientistFactBubble:
         experience._begin_journey()
         experience._start_observe()
         experience.overlay.say_fact(i18n.tr("fact_fire_triangle"))
-        assert experience.overlay.thought_bubble.text()
+        assert experience.overlay.scientist_bubble.text()
 
         experience.state.go_to(Phase.REVEAL)
         experience._render_phase()
-        assert experience.overlay.thought_bubble.text() == ""
+        assert experience.overlay.scientist_bubble.text() == ""
 
     def test_thermometer_keeps_its_full_observe_height(self, experience):
         """The thermometer must never be shrunk to make room for her --
@@ -5983,105 +6520,277 @@ class TestScientistFactBubble:
         assert experience.overlay.thermometer.height() == without_her
 
     @pytest.mark.parametrize("lang", ["en", "de"])
-    def test_every_fact_bubble_clears_the_thermometer_and_screen_bottom(self, experience, lang):
-        """The regression a screenshot actually caught (back when she
-        stood above the thermometer): German's longer compound-word
-        phrasing pushed the bubble past the thermometer's edge. She now
-        stands below the thermometer instead (see _position_scientist's
-        own docstring for why), so the edge that matters flipped --
-        checked here alongside the screen's own bottom edge, the new
-        constraint that spot introduces. Checked for every fact key, not
-        just the longest, since fit_to's shrink-font loop is what has to
-        keep this true regardless of which one a child happens to see."""
+    def test_every_fact_bubble_stays_within_the_screen_bottom(self, experience, lang):
+        """She now stands in the true bottom-left corner (see
+        _position_scientist's own docstring), nowhere near the
+        thermometer -- checked here against the screen's own bottom
+        edge only. Checked for every fact key, not just the longest,
+        since fit_to's shrink-font loop is what has to keep this true
+        regardless of which one a child happens to see."""
         i18n.set_language(lang)
         experience._begin_journey()
         experience._start_observe()
         for key in experience_mod.FIRE_FACT_KEYS:
             experience.overlay.say_fact(i18n.tr(key))
-            bubble = experience.overlay.thought_bubble.geometry()
+            bubble = experience.overlay.scientist_bubble.geometry()
+            assert bubble.bottom() <= experience.overlay.height(), (lang, key, i18n.tr(key))
+
+    @pytest.mark.parametrize("lang", ["en", "de"])
+    def test_every_buddy_line_clears_the_thermometer(self, experience, lang):
+        """The worker mascot's own speech bubble now stands in the tight
+        corner next to the thermometer (see the class-level swap note in
+        PublicOverlay.__init__ -- Dr. Funke's own bubble used to be the
+        one that had to clear the thermometer here, before the corner
+        swap moved that constraint onto his). Checked across every real
+        story/fact line the buddy actually says, not a synthetic one, so
+        this exercises the same fit_to() shrink path his real dialogue
+        does."""
+        i18n.set_language(lang)
+        experience._begin_journey()
+        experience._start_observe()
+        for key in experience_mod.FIRE_FACT_KEYS:
+            experience.overlay.say(i18n.tr(key))
+            bubble = experience.overlay.bubble.geometry()
             thermometer_bottom = experience.overlay.thermometer.geometry().bottom()
             assert bubble.top() > thermometer_bottom, (lang, key, i18n.tr(key))
             assert bubble.bottom() <= experience.overlay.height(), (lang, key, i18n.tr(key))
 
+    @pytest.mark.parametrize("lang", ["en", "de"])
+    def test_no_buddy_bubble_ever_clips_its_own_text(self, experience, lang):
+        """The regression a real screenshot actually caught, back when
+        Dr. Funke stood in the true bottom-right corner: that spot
+        leaves only ~124x85px for the whole bubble, tighter than the
+        ~150-160px the font-shrink floor (fit_to) was tuned against
+        before -- even at that floor, the single longest German fact
+        still needed 108px of wrapped text in an 85px box, and the
+        widget silently accepted the overflow rather than refusing to
+        fit. The corner swap (see PublicOverlay.__init__'s own note)
+        moved that tight pocket -- and its fit_to() call -- onto the
+        worker mascot's own bubble instead, so this now exercises his.
+        heightForWidth (what fit_to uses to decide when to stop
+        shrinking) has to stay <= the widget's own final height for
+        every fact in both languages, not just look right in the one
+        screenshot that happened to get taken."""
+        i18n.set_language(lang)
+        experience._begin_journey()
+        experience._start_observe()
+        for key in experience_mod.FIRE_FACT_KEYS:
+            experience.overlay.say(i18n.tr(key))
+            bubble = experience.overlay.bubble
+            needed = bubble.heightForWidth(bubble.width())
+            assert needed <= bubble.height(), (lang, key, i18n.tr(key), needed, bubble.height())
+
+    @pytest.mark.parametrize("lang", ["en", "de"])
+    def test_no_fact_bubble_ever_clips_its_own_text(self, experience, lang):
+        """Her own bubble no longer needs fit_to()'s shrink loop in the
+        generous bottom-left corner (see _position_scientist_bubble,
+        which sizes it with a plain resize() instead) -- this is now a
+        lightweight regression check that stays true by construction,
+        kept so a future corner change can't silently reintroduce
+        clipping without a test noticing."""
+        i18n.set_language(lang)
+        experience._begin_journey()
+        experience._start_observe()
+        for key in experience_mod.FIRE_FACT_KEYS:
+            experience.overlay.say_fact(i18n.tr(key))
+            bubble = experience.overlay.scientist_bubble
+            needed = bubble.heightForWidth(bubble.width())
+            assert needed <= bubble.height(), (lang, key, i18n.tr(key), needed, bubble.height())
+
     def test_bubble_sits_beside_her_not_over_the_thermometer(self, experience):
+        """To her *right*, not her left: she now corner-hugs the true
+        bottom-left (swapped with the worker mascot -- see the
+        class-level swap note in PublicOverlay.__init__), the same
+        corner and orientation his own bubble always used there. Nowhere
+        near the thermometer (opposite corner) any more, so no overlap
+        check against it is meaningful here -- that constraint now
+        belongs to whichever mascot stands in the tight corner instead
+        (see TestScientistFactBubble's own buddy/thermometer test)."""
         experience._begin_journey()
         experience._start_observe()
         experience.overlay.say_fact(i18n.tr("fact_cool_air_sinks"))
         scientist = experience.overlay.scientist.geometry()
-        bubble = experience.overlay.thought_bubble.geometry()
-        thermometer = experience.overlay.thermometer.geometry()
+        bubble = experience.overlay.scientist_bubble.geometry()
         assert bubble.left() >= scientist.right()
-        assert not bubble.intersects(thermometer)
-        assert not scientist.intersects(thermometer)
 
-    def test_settling_does_not_leave_the_mascot_bubble_overlapping_her(self, experience, qapp):
+    def test_she_corner_hugs_with_the_same_margin_the_buddy_uses(self, experience):
+        """She now anchors bottom-left with the same fixed 32px margin
+        the buddy's own old placement there always used (swapped -- see
+        the class-level note in PublicOverlay.__init__): a literal
+        mirror is possible now, unlike when she stood bottom-right next
+        to the thermometer's own gutter column."""
+        experience._begin_journey()
+        experience._start_observe()
+        scientist = experience.overlay.scientist.geometry()
+        assert scientist.left() == 32
+
+    def test_settling_does_not_leave_her_bubble_overlapping_the_buddy(self, experience, qapp):
         """The regression a geometry sweep actually caught: set_thermometer_
         visible positions the thermometer once synchronously, using
         possibly-stale meter geometry, then corrects it a moment later
         via a deferred zero-ms timer (_reposition_thermometer_once_
-        settled) once everything has actually settled. The primary
-        mascot's own speech bubble clamps its width against
-        self.thermometer.x() (_position_mascot), computed back when the
-        thermometer visibility was first set -- before that correction
-        ran. When settling moved the thermometer even a few px, the
-        bubble's clamp went stale and it overlapped whatever stands at
-        the thermometer's real x, which is exactly where Dr. Funke
-        stands. Letting the deferred correction's own timer actually
-        fire (via processEvents) is what reproduces it; asserting only
-        right after _start_observe(), before that timer fires, would
-        have missed it entirely."""
+        settled) once everything has actually settled. Dr. Funke's own
+        speech bubble clamps its width against self.thermometer.x()
+        (_position_scientist_bubble -- this clamp moved onto her bubble
+        with the corner swap, see PublicOverlay.__init__'s own note),
+        computed back when the thermometer visibility was first set --
+        before that correction ran. When settling moved the thermometer
+        even a few px, the bubble's clamp went stale and it overlapped
+        whatever stands at the thermometer's real x, which is exactly
+        where the worker mascot now stands. Letting the deferred
+        correction's own timer actually fire (via processEvents) is what
+        reproduces it; asserting only right after _start_observe(),
+        before that timer fires, would have missed it entirely.
+
+        Only his *avatar* is checked here, not his own speech bubble --
+        the two bubbles' bounding boxes are allowed to overlap (a
+        tighter bound made a bubble in the tight corner unreadable once
+        that occupant grew enough to stand close to the thermometer,
+        back when Dr. Funke was the one there). What actually keeps them
+        from ever being up at once is PublicExperience._show_next_fact's
+        timing deferral, covered by TestScientistFactBubble's own defer
+        tests, not spatial separation."""
         experience._begin_journey()
         experience._start_observe()
         experience.overlay.say_fact(i18n.tr("fact_hot_air_rises"))
         for _ in range(10):
             qapp.processEvents()
-        mascot_bubble = experience.overlay.bubble.geometry()
-        scientist = experience.overlay.scientist.geometry()
-        thought_bubble = experience.overlay.thought_bubble.geometry()
-        assert not mascot_bubble.intersects(scientist)
-        assert not mascot_bubble.intersects(thought_bubble)
+        scientist_bubble = experience.overlay.scientist_bubble.geometry()
+        mascot = experience.overlay.mascot.geometry()
+        assert not scientist_bubble.intersects(mascot)
 
     @pytest.mark.parametrize("lang", ["en", "de"])
-    def test_bubble_never_runs_past_the_right_edge_of_the_screen(self, experience, lang):
-        """The regression a second screenshot caught: ThoughtBubble's own
-        setMinimumWidth(170) silently overrode _position_thought_bubble's
-        width clamp -- QWidget.resize() snaps back up to a widget's own
-        minimum, so a bubble computed to fit the ~156px-wide sidebar
-        gutter still rendered at 170px and ran 10px off an 800px-wide
-        screen. Checked for every fact key: the clamp has to hold
-        regardless of which one happens to be short enough to hit it."""
+    def test_buddy_bubble_never_runs_past_the_left_edge_of_the_screen(self, experience, lang):
+        """The regression a second screenshot caught, back when Dr.
+        Funke stood in the tight corner: the bubble widget's own
+        setMinimumWidth silently overrode the corner's own width clamp
+        -- QWidget.resize() snaps back up to a widget's own minimum, so
+        a bubble computed to fit the narrow gutter still rendered wider
+        and ran off the screen edge. min_width=130 on this SpeechBubble
+        instance (far under the generous corner's own 280 default) is
+        the fix; the corner swap (see PublicOverlay.__init__'s own note)
+        moved this tight-corner treatment onto the worker mascot's own
+        bubble, which now points *left* off the screen's own left edge
+        instead of right. Checked for every fact key, since the clamp
+        has to hold regardless of which one happens to be short enough
+        to trigger it."""
         i18n.set_language(lang)
         experience._begin_journey()
         experience._start_observe()
         for key in experience_mod.FIRE_FACT_KEYS:
-            experience.overlay.say_fact(i18n.tr(key))
-            bubble = experience.overlay.thought_bubble.geometry()
-            assert bubble.right() <= experience.overlay.width(), (lang, key, i18n.tr(key))
+            experience.overlay.say(i18n.tr(key))
+            bubble = experience.overlay.bubble.geometry()
+            assert bubble.left() >= 0, (lang, key, i18n.tr(key))
 
     def test_fact_queue_cycles_through_every_key_before_repeating(self, experience):
         experience._begin_journey()
         experience._start_observe()
+        self._force_lull(experience)
+        token = experience._fact_chain_token
         seen = set()
         for _ in range(len(experience_mod.FIRE_FACT_KEYS)):
-            experience._show_next_fact()
-            seen.add(experience.overlay.thought_bubble.text())
+            experience._show_next_fact(token)
+            seen.add(experience.overlay.scientist_bubble.text())
         assert len(seen) == len(experience_mod.FIRE_FACT_KEYS)
 
     def test_show_next_fact_is_a_noop_once_the_phase_has_moved_on(self, experience):
-        """Mirrors the phase-guard every other deferred OBSERVE-only
-        callback in this module already relies on (_defer_if_current) --
-        a stale timer firing after the child has moved on must not pop
-        a fact onto a screen that no longer shows her at all."""
+        """A stale timer firing after the child has moved on must not
+        pop a fact onto a screen that no longer shows her at all --
+        guarded by both the explicit phase check and the fact-chain
+        token going stale (see _arm_fact_timer's own docstring)."""
         experience._begin_journey()
         experience._start_observe()
+        self._force_lull(experience)
+        token = experience._fact_chain_token
         experience.state.record_prediction("cooler")
         experience.state.record_choice("fan_on")
         experience.state.go_to(Phase.REVEAL)
         experience._render_phase()
 
-        experience._show_next_fact()
+        experience._show_next_fact(token)
 
-        assert experience.overlay.thought_bubble.text() == ""
+        assert experience.overlay.scientist_bubble.text() == ""
+
+    # ---------------------------------------------------- ambient deferral
+    # The actual point of this whole design: she fills quiet moments, she
+    # doesn't add to a busy one. These four pin the mechanism directly,
+    # not just its visible symptom.
+
+    def test_defers_when_the_buddy_spoke_recently(self, experience):
+        """_start_observe() itself just called overlay.say(...) (the
+        OBSERVE invitation) -- seconds_since_say() reads near-zero
+        immediately after, well inside _LULL_GRACE_S, even though
+        _last_interaction_at is forced far in the past here to isolate
+        this one signal."""
+        experience._begin_journey()
+        experience._start_observe()
+        experience._last_interaction_at = 0.0
+        assert experience.overlay.seconds_since_say() < experience_mod._LULL_GRACE_S
+        token = experience._fact_chain_token
+
+        experience._show_next_fact(token)
+
+        assert experience.overlay.scientist_bubble.text() == ""
+
+    def test_defers_when_the_child_interacted_recently(self, experience):
+        experience._begin_journey()
+        experience._start_observe()
+        experience.overlay._last_say_at = 0.0   # isolate: only interaction-recency matters here
+        experience._last_interaction_at = time.monotonic()
+        token = experience._fact_chain_token
+
+        experience._show_next_fact(token)
+
+        assert experience.overlay.scientist_bubble.text() == ""
+
+    def test_shows_a_fact_once_both_signals_are_outside_the_grace_window(self, experience):
+        experience._begin_journey()
+        experience._start_observe()
+        self._force_lull(experience)
+        token = experience._fact_chain_token
+
+        experience._show_next_fact(token)
+
+        assert experience.overlay.scientist_bubble.text() != ""
+
+    def test_a_fresh_buddy_say_cuts_off_her_currently_showing_fact(self, experience, qapp):
+        """The other direction of "never both up at once": a fact
+        already showing gets interrupted the instant the buddy has
+        something fresh to say (PublicOverlay.say), not merely blocked
+        from starting one near it (_is_a_lull) -- a child's tap mid-fact
+        triggers exactly this ordering in the real app. The cut-off
+        itself is a deferred zero-ms QTimer, not an inline call (see
+        say()'s own comment on why -- reentrant Qt event handling this
+        app hit a real crash from), so this needs a processEvents() to
+        let that queued timer actually fire before checking."""
+        experience._begin_journey()
+        experience._start_observe()
+        self._force_lull(experience)
+        experience._show_next_fact(experience._fact_chain_token)
+        assert experience.overlay.scientist_bubble.text() != ""
+
+        experience.overlay.say("Something just happened!", "curious")
+        for _ in range(3):
+            qapp.processEvents()
+
+        assert experience.overlay.scientist_bubble.text() == ""
+
+    def test_a_deferred_fact_retries_and_appears_once_the_lull_arrives(self, experience):
+        """The deferral must not just cancel a fact outright -- a fact
+        merely postponed by a stray tap still gets its ambient turn
+        once things go quiet, on the short _FACT_RETRY_MS cadence, not
+        the full _FACT_GAP_MS one."""
+        experience._begin_journey()
+        experience._start_observe()
+        experience._last_interaction_at = time.monotonic()   # not a lull yet
+        token = experience._fact_chain_token
+
+        experience._show_next_fact(token)
+        assert experience.overlay.scientist_bubble.text() == ""
+
+        self._force_lull(experience)
+        experience._show_next_fact(token)   # simulates the retry timer firing
+        assert experience.overlay.scientist_bubble.text() != ""
 
 
 # ------------------------------------------------------------- manifest

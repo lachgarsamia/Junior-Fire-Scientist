@@ -11,7 +11,7 @@ from cinema.bloom import apply_bloom
 from cinema.interp import lerp_frames
 from cinema.luts import FIRE_RGBA_LUT
 from cinema.particles import EmberParticles
-from cinema.pipeline import AutoExposure, EffectsPipeline, filmic_tonemap
+from cinema.pipeline import AutoExposure, EffectsPipeline, _suppress_haze_over_smoke, filmic_tonemap
 from cinema.shimmer import HeatShimmer
 from cinema.smoke import SmokeSimulator, composite_over, smoke_rgba
 
@@ -96,6 +96,59 @@ class TestBloom:
         out = apply_bloom(rgba, intensity)
         assert (out == rgba).all()
 
+class TestSuppressHazeOverSmoke:
+    """cinema.pipeline._suppress_haze_over_smoke: the actual mechanism
+    behind the 'smoke plume reads as orange' report, applied to the
+    fully-composed (LUT + bloom) fire layer rather than to bloom alone
+    -- see its own docstring for the real, measured counter-example
+    (a strongly-ventilated flame's own lower peak temperature) that
+    ruled out an opacity-based version of this check."""
+
+    def test_haze_pixel_under_dense_smoke_loses_most_of_its_alpha(self):
+        frame = np.full((21, 21), 20.0, dtype=np.float32)
+        frame[10, 8] = 100.0   # warm, but nowhere near flame-core temperature
+        fire_rgba = np.zeros((21, 21, 4), dtype=np.uint8)
+        fire_rgba[10, 8] = [255, 187, 7, 255]   # a fully-opaque, warm pixel (the real regression)
+        density = np.zeros((21, 21), dtype=np.float32)
+        density[10, 8] = 1.0
+
+        out = _suppress_haze_over_smoke(fire_rgba, frame, density)
+        assert out[10, 8, 3] < fire_rgba[10, 8, 3]
+
+    def test_true_flame_core_is_untouched_regardless_of_smoke_density(self):
+        """Opacity alone can't tell a hot haze pixel from a true flame
+        pixel (a first version of this check used alpha and broke on
+        exactly this), but raw temperature always can: >= the ceiling
+        means "still burning," and that alpha survives even saturated
+        smoke density on the same cell."""
+        frame = np.full((21, 21), 20.0, dtype=np.float32)
+        frame[10, 8] = 400.0   # real flame-core territory
+        fire_rgba = np.zeros((21, 21, 4), dtype=np.uint8)
+        fire_rgba[10, 8] = [255, 120, 20, 255]
+        density = np.zeros((21, 21), dtype=np.float32)
+        density[10, 8] = 1.0
+
+        out = _suppress_haze_over_smoke(fire_rgba, frame, density)
+        assert out[10, 8, 3] == fire_rgba[10, 8, 3] == 255
+
+    def test_no_smoke_no_suppression_even_for_a_haze_pixel(self):
+        frame = np.full((21, 21), 20.0, dtype=np.float32)
+        frame[10, 8] = 100.0
+        fire_rgba = np.zeros((21, 21, 4), dtype=np.uint8)
+        fire_rgba[10, 8] = [255, 187, 7, 200]
+        density = np.zeros((21, 21), dtype=np.float32)   # no smoke anywhere
+
+        out = _suppress_haze_over_smoke(fire_rgba, frame, density)
+        assert out[10, 8, 3] == fire_rgba[10, 8, 3]
+
+    def test_shape_and_dtype_preserved(self):
+        frame = np.full((12, 12), 20.0, dtype=np.float32)
+        fire_rgba = np.zeros((12, 12, 4), dtype=np.uint8)
+        density = np.zeros((12, 12), dtype=np.float32)
+        out = _suppress_haze_over_smoke(fire_rgba, frame, density)
+        assert out.shape == fire_rgba.shape
+        assert out.dtype == np.uint8
+
 
 class TestLerpFrames:
     def test_endpoints_and_midpoint(self):
@@ -152,6 +205,19 @@ class TestSmokeCompositing:
         rgba = smoke_rgba(density)
         assert rgba[0, 0, 3] == 0
         assert rgba[0, 1, 3] > 0
+
+    def test_smoke_tint_reads_as_neutral_grey_not_a_warm_flame_color(self):
+        """A real report: the plume was mistakable for fire. FIRE_RGBA_LUT's
+        own warm end (the thing it must stay visually distinct from) has a
+        wide R > G > B spread (e.g. its hottest entries approach pure warm
+        white/yellow from an orange base) -- smoke's tint should instead be
+        close to R == G == B, so it reads as grey/grey-white regardless of
+        how much of the warm LUT range sits nearby on screen."""
+        density = np.array([[1.0]], dtype=np.float32)
+        r, g, b, _ = smoke_rgba(density)[0, 0]
+        channel_spread = int(max(r, g, b)) - int(min(r, g, b))
+        assert channel_spread <= 12, (
+            f"smoke tint ({r}, {g}, {b}) has too wide a channel spread to read as neutral grey")
 
     def test_opaque_top_fully_occludes_bottom(self):
         top = np.zeros((2, 2, 4), dtype=np.uint8)

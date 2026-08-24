@@ -14,8 +14,12 @@ journey fits in 60-90 s.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import random
+import sys
+import time
+import traceback
 
 from PyQt5 import QtCore, QtWidgets
 
@@ -66,7 +70,7 @@ EXPERIMENT_END_FRAME = 400
 
 # The countdown before a run: four beats of ~400 ms.
 COUNTDOWN_STEP_MS = 400
-_COUNTDOWN_STEPS = ("3", "2", "1", "🔥")
+_COUNTDOWN_STEPS = ("3", "2", "1", "🕯️")
 
 # Phases where tapping the heatmap measures a real temperature there.
 # Not the guided question/countdown/reveal-transition screens, where a
@@ -85,7 +89,6 @@ FIRE_FACT_KEYS = (
     "fact_hot_air_rises",
     "fact_smoke_ceiling_first",
     "fact_fire_triangle",
-    "fact_flame_temperature",
     "fact_moving_air_oxygen",
     "fact_cool_air_sinks",
     "fact_blue_flame_hottest",
@@ -93,14 +96,28 @@ FIRE_FACT_KEYS = (
     "fact_smoke_more_dangerous",
     "fact_firefighters_study_smoke",
 )
-_FACT_SHOW_MS = 7000
-_FACT_GAP_MS = 15000
-_FACT_FIRST_DELAY_MS = 9000
-
-# Phases where the fan/vent marker (anchored to the real vent position)
-# is worth showing -- the phases where the scene itself, not a card, is
-# what fills the screen.
-FAN_MARKER_PHASES = (Phase.OBSERVE, Phase.EXPERIMENT, Phase.GAME_PLAY)
+# 7000 -> 14000: per explicit feedback ("let the message pop for a
+# longer while so user can read it slowly, no rush") -- doubled, not
+# just nudged, so a child reading at their own pace never has it
+# disappear mid-sentence.
+_FACT_SHOW_MS = 14000
+# 15000 -> 24000: an explicitly-requested slower, more ambient cadence
+# (~20-30s between facts, not ~15-22s) -- she should read as filling
+# occasional quiet moments, not chattering on a short loop.
+_FACT_GAP_MS = 24000
+_FACT_FIRST_DELAY_MS = 12000
+# How soon _show_next_fact retries after finding it isn't a lull (see
+# _is_a_lull) -- short, since this is "try again shortly", not a new
+# full-length wait; _defer_if_current's own phase guard is what stops
+# these retries once OBSERVE is actually left, so this can't spin
+# forever on some other phase.
+_FACT_RETRY_MS = 4000
+# How recently the primary mascot must have spoken, or the child must
+# have interacted, for a fact to be withheld -- "a genuine lull," not
+# merely "no fact currently showing." Same window for both checks (see
+# _is_a_lull): the ask was "a few seconds" for either, not two
+# different tunings.
+_LULL_GRACE_S = 4.0
 
 # Which stage of the WATCH -> GUESS -> TEST -> DISCOVER strip each phase
 # belongs to. -1 means "no journey under way", so the strip is hidden --
@@ -227,6 +244,30 @@ class PublicExperience(QtWidgets.QWidget):
         # there's no reason to make a visitor sit through the same one
         # twice just because they flipped the fan.
         self._fact_queue: list = []
+        # Bumped once per _arm_fact_timer() call, own guard the whole
+        # fact-timer chain checks against -- deliberately separate from
+        # _interaction_generation (see _arm_fact_timer's own comment on
+        # why reusing that one is wrong here). Lets a same-screen
+        # OBSERVE re-render (e.g. returning from the Games hub) cleanly
+        # retire whatever chain was already pending instead of running
+        # two in parallel.
+        self._fact_chain_token = 0
+        # 0.0, not time.monotonic(): reads as "long ago" from the first
+        # check without a sentinel -- see _last_say_at's own comment
+        # (PublicOverlay) for why the same idiom is used there. Bumped
+        # in _on_overlay_tapped and _on_explore_changed, the same two
+        # handlers _idle_vent_timer already hooks -- see _show_next_fact
+        # for why this and PublicOverlay.seconds_since_say() are checked
+        # together before a fact is allowed to appear.
+        self._last_interaction_at = 0.0
+        # TEMPORARY diagnostic instrumentation for the real, live SIGABRT
+        # crash under investigation (a 3-4 level deep Qt signal/slot
+        # chain ending in abort(), per the crash report) -- tracks
+        # re-entrancy depth per named call site so a repro run can show
+        # whether any of these are genuinely being re-entered while
+        # already on the call stack, not just guessed at from the C-level
+        # trace. See _diag_reentrancy_guard. Remove once root-caused.
+        self._diag_depths: dict = {}
         self._active = False
         # Set by _play_until(): the frame playback should stop at, and
         # what to run when it gets there. None means "no scheduled stop"
@@ -291,6 +332,12 @@ class PublicExperience(QtWidgets.QWidget):
         self.scene = PublicScene(sim_data.store, sim_data.manifest or [],
                                  sim_data.timesteps_per_second, self)
         self.overlay = PublicOverlay(self)
+        # Reserve real screen space for the mascots at the bottom of the
+        # scene, rather than letting them float on top of the flame/room
+        # they'd otherwise overlap (a real, screenshotted complaint) --
+        # both mascot sizes are fixed for the life of the app, so this is
+        # set once here rather than recomputed per scenario switch.
+        self.scene.set_bottom_reserve_px(self.overlay.mascot_band_height_px())
 
         # StackAll keeps the scene painted underneath and the overlay on
         # top, both filling the widget -- the overlay is translucent, so
@@ -518,7 +565,7 @@ class PublicExperience(QtWidgets.QWidget):
                   for d in reversed(self._discoveries)]
         self.overlay.show_card(tr("notebook_title"), board, dim_lines=history)
         self.overlay.say(tr("notebook_say"), EXCITED)
-        self.overlay.add_button(tr("keep_exploring"), "🔥", self._close_compare, primary=True)
+        self.overlay.add_button(tr("keep_exploring"), "🕯️", self._close_compare, primary=True)
 
     # -- Phase 5: temperature trail (build-your-own map) -----------------
     _MAX_TRAIL_POINTS = 6
@@ -595,36 +642,6 @@ class PublicExperience(QtWidgets.QWidget):
         self.scene.refresh()
         self._refresh_game_buttons()
 
-    def _update_fan_marker(self) -> None:
-        """Anchor the fan label to the real vent position for whatever
-        scenario is now loaded -- None/hidden when this study has no
-        manifest entry or the current plane isn't the one the geometry
-        is defined against (PublicScene.vent_marker_position's own gate).
-        Updates the thermometer's room-wall anchor in the same breath --
-        both are the scene's own real-geometry positions and always go
-        stale together on a scenario switch."""
-        position = self.scene.vent_marker_position(self.state.case_index)
-        if position is None:
-            self.overlay.set_fan_marker(None, False)
-        else:
-            frac = self.scene.widget_fraction_for(*position)
-            entry = self.scene.current_entry()
-            self.overlay.set_fan_marker(frac, entry is not None and entry.vod == 2)
-        wall_position = self.scene.room_wall_anchor(self.state.case_index)
-        if wall_position is None:
-            self.overlay.set_thermometer_anchor(None)
-        else:
-            wall_frac_x, _wall_frac_y = self.scene.widget_fraction_for(*wall_position)
-            self.overlay.set_thermometer_anchor(wall_frac_x)
-
-    def _hide_fan_marker(self) -> None:
-        """Hides the fan label -- stealing vertical space from a phase
-        (SCIENCE, a compare detour) that has no vent to show at all, on
-        the strength of a now-stale frac from whatever OBSERVE visit
-        last set it, caused a real, measured HeroMetric clip on the
-        SCIENCE card before this."""
-        self.overlay.set_fan_marker(None, False)
-
     def _load_case(self, case_index) -> None:
         if case_index is None:
             return
@@ -639,7 +656,6 @@ class PublicExperience(QtWidgets.QWidget):
         # even if the previous scenario's beat at the same frame index had.
         self._restart_narration()
         self._reset_probe_state()
-        self._update_fan_marker()
         self.time_controller.seek(0)
         if not self._active:
             # seek(0) above only reaches the scene through
@@ -934,10 +950,6 @@ class PublicExperience(QtWidgets.QWidget):
         self._last_rendered_game = self._active_game if phase is Phase.GAME_PLAY else None
         self.scene.clear_probe(keep_trail=same_screen_rerender)
         self._reset_probe_state()
-        if phase not in FAN_MARKER_PHASES:
-            self._hide_fan_marker()
-        else:
-            self._update_fan_marker()
         if phase not in (Phase.OBSERVE, Phase.GAME_PLAY):
             self.overlay.set_explore_visible(False)
             self._clear_game_state()
@@ -990,17 +1002,19 @@ class PublicExperience(QtWidgets.QWidget):
         temperature reading. Explore and a Games activity react quite
         differently to the same tap, so this only measures and then
         dispatches by phase."""
-        if self.state.phase not in PROBE_PHASES:
-            return
-        result = self.scene.probe_at(pos)
-        if result is None:
-            return
-        self._idle_vent_timer.stop()
-        x, z, value = result
-        if self.state.phase is Phase.GAME_PLAY:
-            self._on_game_tap(x, z, value)
-        else:
-            self._on_explore_tap(x, z, value)
+        with self._diag_reentrancy_guard("_on_overlay_tapped"):
+            if self.state.phase not in PROBE_PHASES:
+                return
+            result = self.scene.probe_at(pos)
+            if result is None:
+                return
+            self._idle_vent_timer.stop()
+            self._last_interaction_at = time.monotonic()
+            x, z, value = result
+            if self.state.phase is Phase.GAME_PLAY:
+                self._on_game_tap(x, z, value)
+            else:
+                self._on_explore_tap(x, z, value)
 
     def _on_explore_tap(self, x: float, z: float, value: float) -> None:
         """A plain Explore tap: always just the real reading at that
@@ -1045,7 +1059,7 @@ class PublicExperience(QtWidgets.QWidget):
                 self.overlay.update_thermometer(value, tr("thermometer_at_flame"))
                 self._celebrate(tr("found_flame_say", value=value))
                 self._record_discovery(
-                    "🔥", tr("found_flame_title"), tr("found_flame_discovery", value=value))
+                    "🌡️", tr("found_flame_title"), tr("found_flame_discovery", value=value))
                 return
             if game == "hottest":
                 # Hunting for the *coolest* place: the candle is
@@ -1121,15 +1135,17 @@ class PublicExperience(QtWidgets.QWidget):
 
     def _current_factors(self) -> dict:
         """The real, currently-loaded scenario's own factor values for
-        every exposed explore control, plus door -- the one factor none
-        of them varies, held at the same wide-open value every
-        ExploreControl.held dict already fixes it to. This is the
-        starting point _on_explore_changed composes a single change on
-        top of, so flipping one control keeps whatever the others are
-        already set to instead of resetting them to a baseline the
-        child may have already left (see _on_explore_changed's own
-        docstring). Falls back to every control's own default if
-        nothing is loaded yet."""
+        every exposed explore control (candles, vent1/vod, vent2/voc,
+        door -- see EXPLORE_CONTROLS). `factors["door"] = 1` is only a
+        fallback for a study where door isn't an available control (its
+        own ExploreControl.held default); the loop below overwrites it
+        with the real value whenever door *is* exposed, same as any
+        other control. This is the starting point _on_explore_changed
+        composes a single change on top of, so flipping one control
+        keeps whatever the others are already set to instead of
+        resetting them to a baseline the child may have already left
+        (see _on_explore_changed's own docstring). Falls back to every
+        control's own default if nothing is loaded yet."""
         entry = self.scene.current_entry()
         factors = {"door": 1}
         for control in self._explore_controls:
@@ -1154,68 +1170,83 @@ class PublicExperience(QtWidgets.QWidget):
         feedback (Qt flips a checkable button's pressed state before this
         slot runs), so nothing here needs to fake an "acknowledged" step.
         """
-        if self.state.phase not in (Phase.OBSERVE, Phase.GAME_PLAY):
-            return
-        self._idle_vent_timer.stop()
-        control = next((c for c in self._explore_controls if c.key == control_key), None)
-        if control is None:
-            return
-        factors = self._current_factors()
-        factors[control.factor] = value
-        case_index = experiments_mod.resolve_case_index(self.sim_data.manifest, factors)
-        if case_index is None or case_index == self.state.case_index:
-            return
-        # Force the toggle's own new visual state onto the screen *now*,
-        # before the potentially-expensive scene switch below (a full
-        # canvas redraw through the cinema pipeline's layered artists can
-        # take several hundred ms on this dataset). Qt only flips the
-        # checked *state* synchronously here -- the repaint that shows it
-        # is otherwise deferred until this whole slot returns, so without
-        # this the button visually does nothing for as long as the scene
-        # switch takes, reading as an unresponsive tap rather than an
-        # instant one.
-        self.overlay.repaint()
-        # Phase 8 section 7: whatever the child had already measured
-        # becomes the "before" record for this change -- kept on screen
-        # (dimmed) rather than wiped, so revisiting one of these spots
-        # afterward reads as "I measured HERE before" (see
-        # _match_before_trail) instead of requiring "Compare this place"
-        # to be armed first.
-        before_trail = list(self._temp_trail)
-        active_game = self._active_game
-        self._clear_game_state()
-        self._active_game = active_game   # which Games activity this is stays put
-        self._load_case(case_index)
-        if before_trail:
-            self._before_trail = before_trail
-            # redraw=False on every point but the last: each add_trail_
-            # marker() redraw is a full ~140 ms cinema-pipeline canvas
-            # draw, so restoring N "before" points used to pay N of them
-            # back-to-back -- one real, measured contributor to "why does
-            # switching feel slow" for a child who had already tapped
-            # around before flipping the Fan/Candle toggle.
-            last = len(self._before_trail) - 1
-            for index, point in enumerate(self._before_trail):
-                self.scene.add_trail_marker(point["x"], point["z"], index + 1, dim=True,
-                                            redraw=index == last)
-        # _label_for_case can now list more than one differing factor
-        # (see its own docstring) but only ever names them in words, no
-        # icon -- this control's own icon leads, same as before, since
-        # it is the one the child just touched.
-        self._last_change = f"{control.icon} {self._label_for_case(case_index)}"
-        # A short, physical reaction rather than a caption -- "the child
-        # should see the consequence before reading any number" (Phase 3
-        # section 2). The banner briefly takes over in the accent colour
-        # (same flash mechanism a detected story beat already uses) so it
-        # reads as a felt event, not a settings confirmation.
-        if control_key == "fan":
-            self.overlay.banner.flash(tr("banner_whoosh") if value else tr("banner_quiet_again"))
-            self.overlay.say(tr("explore_changed_fan"), CURIOUS)
-        else:
-            self.overlay.say(tr("explore_changed_other"), CURIOUS)
-        self._start_free_play()
-        if self.state.phase is Phase.GAME_PLAY:
-            self._refresh_game_buttons()
+        with self._diag_reentrancy_guard("_on_explore_changed"):
+            if self.state.phase not in (Phase.OBSERVE, Phase.GAME_PLAY):
+                return
+            self._idle_vent_timer.stop()
+            self._last_interaction_at = time.monotonic()
+            control = next((c for c in self._explore_controls if c.key == control_key), None)
+            if control is None:
+                return
+            factors = self._current_factors()
+            factors[control.factor] = value
+            case_index = experiments_mod.resolve_case_index(self.sim_data.manifest, factors)
+            if case_index is None or case_index == self.state.case_index:
+                return
+            # Force the toggle's own new visual state onto the screen *now*,
+            # before the potentially-expensive scene switch below (a full
+            # canvas redraw through the cinema pipeline's layered artists can
+            # take several hundred ms on this dataset). Qt only flips the
+            # checked *state* synchronously here -- the repaint that shows it
+            # is otherwise deferred until this whole slot returns, so without
+            # this the button visually does nothing for as long as the scene
+            # switch takes, reading as an unresponsive tap rather than an
+            # instant one.
+            #
+            # TEMPORARY diagnostic prints bracket this specific call: a
+            # synchronous repaint() is the one call in this whole slot that
+            # can pump the event loop and re-enter application code before
+            # this slot itself returns -- the prime suspect for the real
+            # crash's reentrant Qt signal/slot chain.
+            print("[DIAG] before overlay.repaint()", file=sys.stderr)
+            self.overlay.repaint()
+            print("[DIAG] after overlay.repaint()", file=sys.stderr)
+            # Phase 8 section 7: whatever the child had already measured
+            # becomes the "before" record for this change -- kept on screen
+            # (dimmed) rather than wiped, so revisiting one of these spots
+            # afterward reads as "I measured HERE before" (see
+            # _match_before_trail) instead of requiring "Compare this place"
+            # to be armed first.
+            before_trail = list(self._temp_trail)
+            active_game = self._active_game
+            self._clear_game_state()
+            self._active_game = active_game   # which Games activity this is stays put
+            self._load_case(case_index)
+            if before_trail:
+                self._before_trail = before_trail
+                # redraw=False on every point but the last: each add_trail_
+                # marker() redraw is a full ~140 ms cinema-pipeline canvas
+                # draw, so restoring N "before" points used to pay N of them
+                # back-to-back -- one real, measured contributor to "why does
+                # switching feel slow" for a child who had already tapped
+                # around before flipping the Fan/Candle toggle.
+                last = len(self._before_trail) - 1
+                for index, point in enumerate(self._before_trail):
+                    self.scene.add_trail_marker(point["x"], point["z"], index + 1, dim=True,
+                                                redraw=index == last)
+            # _label_for_case can now list more than one differing factor
+            # (see its own docstring) but only ever names them in words, no
+            # icon -- this control's own icon leads, same as before, since
+            # it is the one the child just touched.
+            self._last_change = f"{control.icon} {self._label_for_case(case_index)}"
+            # A short, physical reaction rather than a caption -- "the child
+            # should see the consequence before reading any number" (Phase 3
+            # section 2). The banner briefly takes over in the accent colour
+            # (same flash mechanism a detected story beat already uses) so it
+            # reads as a felt event, not a settings confirmation.
+            if control_key == "vent1":
+                # value is the real vod level (0=open, 1=closed, 2=HVAC
+                # fan) -- only the fan state itself is a "whoosh"; closed
+                # is not a truthy leftover of the old open/HVAC-only
+                # control (see _toggle_explore_control_by_tap's own note
+                # on why a plain flip no longer applies here).
+                self.overlay.banner.flash(tr("banner_whoosh") if value == 2 else tr("banner_quiet_again"))
+                self.overlay.say(tr("explore_changed_fan"), CURIOUS)
+            else:
+                self.overlay.say(tr("explore_changed_other"), CURIOUS)
+            self._start_free_play()
+            if self.state.phase is Phase.GAME_PLAY:
+                self._refresh_game_buttons()
 
     _VENT_PULSE_MS = 260
 
@@ -1223,23 +1254,13 @@ class PublicExperience(QtWidgets.QWidget):
         """The vent is a real tappable object in the scene, not just an
         external toggle -- see _toggle_explore_control_by_tap, which
         this and _on_vent2_tapped both share."""
-        self._toggle_explore_control_by_tap("fan", vent_index=0)
-        # Deferred to the next event-loop turn so the marker's geometry
-        # is already the *new* (post-switch) one when the pulse captures
-        # it -- pulsing before the click would animate back to a rect
-        # that set_fan_marker's own reposition immediately overrides.
-        self._defer(0, self.overlay.pulse_fan_marker)
+        self._toggle_explore_control_by_tap("vent1", vent_index=0)
 
     def _on_vent2_tapped(self) -> None:
         """The second (candle-side) vent is a real tappable object too --
         same idea as _on_vent_tapped, against the "vent2" control and the
         second vent line (index 1 in the shared room_vents
-        LineCollection, see PublicScene.pulse_vent). No floating marker
-        label: unlike the fan, this vent's open/closed state is already
-        visible in the vent glyph itself (PublicScene._draw_vent2's slat
-        angle/colour) and in the ExploreToggle's own checked state, so it
-        doesn't need a second copy of set_fan_marker's whole subsystem
-        (see the redesign brief's "do not create duplicate systems" rule)."""
+        LineCollection, see PublicScene.pulse_vent)."""
         self._toggle_explore_control_by_tap("vent2", vent_index=1)
 
     def _toggle_explore_control_by_tap(self, control_key: str, vent_index: int) -> None:
@@ -1258,9 +1279,43 @@ class PublicExperience(QtWidgets.QWidget):
         current = getattr(entry, control.factor, None)
         if current not in options:
             return
-        toggle._group.button(1 - options.index(current)).click()
+        # Bounces between the FIRST and LAST option -- for Vent 2 (two
+        # real states) that's a plain flip, same as before. For Vent 1
+        # (three real states: open/closed/HVAC fan) it jumps straight
+        # between "resting" (open) and "fan on", the dramatic, felt
+        # change a direct tap on the physical object is for (the WHOOSH
+        # banner, the vent's own line-flash) -- landing on the quieter
+        # "closed" state in between is still real and still reachable,
+        # just via the deliberate Vent 1 button row, not this quick tap.
+        last_index = len(options) - 1
+        current_index = options.index(current)
+        next_index = 0 if current_index == last_index else last_index
+        toggle._group.button(next_index).click()
         self.scene.pulse_vent(vent_index)
         self._defer(self._VENT_PULSE_MS, self.scene.reset_vent_width)
+
+    # TEMPORARY -- crash investigation instrumentation, see _diag_depths'
+    # own comment in __init__. Wraps a suspected call site so a repro run
+    # can show whether it's genuinely re-entered while already on the
+    # call stack (the signature the real crash's C-level trace showed:
+    # several chained Qt signal emits before an abort()), rather than
+    # guessing from binary offsets alone. Prints to stderr, not the
+    # logging module, so it survives even if something about logging
+    # setup is itself implicated.
+    @contextlib.contextmanager
+    def _diag_reentrancy_guard(self, name: str):
+        depth = self._diag_depths.get(name, 0) + 1
+        self._diag_depths[name] = depth
+        if depth > 1:
+            print(f"[DIAG] REENTRANT: {name} depth={depth}", file=sys.stderr)
+            traceback.print_stack(file=sys.stderr)
+        else:
+            print(f"[DIAG] enter {name}", file=sys.stderr)
+        try:
+            yield
+        finally:
+            print(f"[DIAG] exit {name} (was depth {depth})", file=sys.stderr)
+            self._diag_depths[name] = depth - 1
 
     def _defer(self, delay_ms: int, callback) -> None:
         """A single-shot delay, parented to this experience -- never the
@@ -1391,8 +1446,8 @@ class PublicExperience(QtWidgets.QWidget):
         compare) must return to exactly where OBSERVE was.
 
         The comparison card carries real bar charts (same widgets the
-        science card uses) and is genuinely tall -- the meters, fan
-        marker and explore toggles must step aside the way REVEAL/
+        science card uses) and is genuinely tall -- the meters and
+        explore toggles must step aside the way REVEAL/
         SCIENCE already do, or the card collides with them at 800x600 (a
         real, screenshotted overlap this replaced). The banner (still
         showing whatever the game last flashed) is the same row the
@@ -1408,7 +1463,6 @@ class PublicExperience(QtWidgets.QWidget):
         self.overlay.clear_buttons()
         self.overlay.set_meters_visible(False)
         self.overlay.set_explore_visible(False)
-        self._hide_fan_marker()
         self.overlay.set_prompt("")
 
     def _on_compare_requested(self) -> None:
@@ -1449,7 +1503,7 @@ class PublicExperience(QtWidgets.QWidget):
             self._last_watched = f"{hero.metric.icon} {hero.metric.label} — {hero.change_text()}"
         finding = kid.mascot_finding(hero) if hero is not None else ""
         self.overlay.say(finding or tr("keep_exploring"), EXCITED if finding else CURIOUS)
-        self.overlay.add_button(tr("keep_exploring"), "🔥", self._close_compare, primary=True)
+        self.overlay.add_button(tr("keep_exploring"), "🕯️", self._close_compare, primary=True)
         if hero is not None:
             self._add_why_button(hero.metric.explanation)
 
@@ -1578,7 +1632,7 @@ class PublicExperience(QtWidgets.QWidget):
             self._celebrate(mascot_line)
         else:
             self.overlay.say(mascot_line, EXCITED if noticeable else CURIOUS)
-        self.overlay.add_button(tr("keep_exploring"), "🔥", self._close_compare, primary=True)
+        self.overlay.add_button(tr("keep_exploring"), "🕯️", self._close_compare, primary=True)
         if mystery_just_solved:
             self._add_why_button(tr("why_moving_air"))
         elif noticeable:
@@ -1601,7 +1655,7 @@ class PublicExperience(QtWidgets.QWidget):
         else:
             close = self.scene.coolest_guess_is_close(x, z, self.state.frame_index)
         if close:
-            icon = "🔥" if target == "hottest" else "🧊"
+            icon = "🌡️" if target == "hottest" else "🧊"
             target_word = tr("target_hottest" if target == "hottest" else "target_coolest")
             self._celebrate(tr("found_spot_say", target=target_word, icon=icon, value=value_c))
             self._record_discovery(
@@ -1656,7 +1710,7 @@ class PublicExperience(QtWidgets.QWidget):
         # visitor arriving mid-loop should need no instructions.
         self.overlay.set_meters_visible(True)
         self.overlay.say(tr("attract_say"), CURIOUS)
-        self.overlay.add_button(tr("attract_button"), "🔥",
+        self.overlay.add_button(tr("attract_button"), "🕯️",
                                 self.overlay.start_requested.emit, primary=True, tall=True)
         # Idle attract: loop the baseline fire quietly behind the invite.
         self.time_controller.set_loop(True)
@@ -1730,7 +1784,7 @@ class PublicExperience(QtWidgets.QWidget):
             [tr("intro_body")],
             [tr("intro_source")])
         self.overlay.say(tr("intro_say"), CURIOUS)
-        self.overlay.add_button(tr("watch_the_fire"), "🔥", self._start_observe, primary=True)
+        self.overlay.add_button(tr("watch_the_fire"), "🕯️", self._start_observe, primary=True)
 
     def _start_observe(self) -> None:
         self.state.go_to(Phase.OBSERVE)
@@ -1794,29 +1848,73 @@ class PublicExperience(QtWidgets.QWidget):
         """Schedule Dr. Funke's next fact -- a real delay before the
         first one (_FACT_FIRST_DELAY_MS) so it doesn't fire the instant
         OBSERVE appears, before a child has looked at anything.
-        _defer_if_current, not a persistent QTimer: the callback simply
-        no-ops if the phase has changed by the time it fires (leaving
-        OBSERVE for a moment and coming back re-arms fresh via
-        _render_phase, rather than this timer needing its own cancel/
-        restart bookkeeping), the same guard _show_next_fact and
-        _hide_fact_and_wait_for_more both rely on too."""
-        self._defer_if_current(_FACT_FIRST_DELAY_MS, self._show_next_fact)
 
-    def _show_next_fact(self) -> None:
-        if self.state.phase is not Phase.OBSERVE:
+        _render_phase calls this every time it renders OBSERVE,
+        including a same-screen re-render (e.g. _on_back_to_explore,
+        returning from the Games hub without ever leaving OBSERVE) --
+        so this can run more than once per visit while a previous
+        chain's timers are still pending. _fact_chain_token is what
+        keeps those from stacking: each call claims a fresh token, and
+        every step below only proceeds if its own token is still the
+        current one, so an old chain quietly stops the moment a new one
+        is armed instead of running in parallel with it.
+
+        Plain _defer, deliberately not _defer_if_current: the latter's
+        own generation guard exists to stop a *stale computed value*
+        (e.g. a thermometer sweep computed against a scenario that's
+        since changed) from landing late -- wrong here, since _load_case
+        bumps that same generation on every Fan/Candle/Vent toggle, and
+        this chain never carries a stale value forward; each step
+        re-reads live state (phase, the lull check) the instant it
+        actually runs. Using _defer_if_current here was a real, latent
+        bug: the very first toggle during OBSERVE would silently and
+        permanently stop the whole fact cycle for the rest of that
+        visit, since nothing else re-arms it short of leaving and
+        re-entering OBSERVE. Plain _defer still avoids the bare-
+        QTimer.singleShot crash risk (see _defer's own docstring) --
+        it's just not tied to that unrelated generation; _fact_chain_
+        token is the guard that actually belongs to this chain."""
+        self._fact_chain_token += 1
+        token = self._fact_chain_token
+        self._defer(_FACT_FIRST_DELAY_MS, lambda: self._show_next_fact(token))
+
+    def _is_a_lull(self) -> bool:
+        """Whether this is a genuinely quiet moment for Dr. Funke to
+        speak into -- neither mascot's own bubble system distinguishes
+        "on screen" from "just said something," so this checks *recency*
+        of each: the primary guide's own OBSERVE invitation stays
+        visible for the whole phase once said (PublicOverlay.say has no
+        auto-hide), so a bare `bubble.isVisible()` check would block her
+        forever. Both conditions, not either -- a fact landing right on
+        top of a fresh reaction line, or right as a child's finger is
+        still on the glass, is exactly the "second character adding to
+        the overload" this whole deferral scheme exists to avoid."""
+        return (self.overlay.seconds_since_say() >= _LULL_GRACE_S
+                and time.monotonic() - self._last_interaction_at >= _LULL_GRACE_S)
+
+    def _show_next_fact(self, token: int) -> None:
+        if token != self._fact_chain_token or self.state.phase is not Phase.OBSERVE:
+            return
+        if not self._is_a_lull():
+            # Not silently dropped -- retried shortly (plain _defer, see
+            # _arm_fact_timer's own comment on why not _defer_if_current),
+            # so a fact merely postponed by a stray tap still gets its
+            # ambient turn once things go quiet, rather than needing to
+            # wait a full _FACT_GAP_MS for the next scheduled attempt.
+            self._defer(_FACT_RETRY_MS, lambda: self._show_next_fact(token))
             return
         if not self._fact_queue:
             self._fact_queue = list(FIRE_FACT_KEYS)
             random.shuffle(self._fact_queue)
         key = self._fact_queue.pop()
         self.overlay.say_fact(tr(key))
-        self._defer_if_current(_FACT_SHOW_MS, self._hide_fact_and_wait_for_more)
+        self._defer(_FACT_SHOW_MS, lambda: self._hide_fact_and_wait_for_more(token))
 
-    def _hide_fact_and_wait_for_more(self) -> None:
-        if self.state.phase is not Phase.OBSERVE:
+    def _hide_fact_and_wait_for_more(self, token: int) -> None:
+        if token != self._fact_chain_token or self.state.phase is not Phase.OBSERVE:
             return
         self.overlay.clear_fact()
-        self._defer_if_current(_FACT_GAP_MS, self._show_next_fact)
+        self._defer(_FACT_GAP_MS, lambda: self._show_next_fact(token))
 
     def _on_games_requested(self) -> None:
         self.time_controller.pause()
@@ -1867,7 +1965,7 @@ class PublicExperience(QtWidgets.QWidget):
         self.overlay.set_prompt(tr("games_hub_prompt"))
         self.overlay.say(tr("games_hub_say"), CURIOUS)
         self.overlay.set_game_tiles([
-            ("🔥", tr("tile_temp_hunt"), self._enter_game_hottest),
+            ("🌡️", tr("tile_temp_hunt"), self._enter_game_hottest),
             ("🧊", tr("tile_hot_cold"), self._enter_game_hotcold),
             ("🔎", tr("tile_mystery"), self._enter_game_mystery),
             ("🧪", tr("tile_test_idea"), self._enter_game_test_idea),

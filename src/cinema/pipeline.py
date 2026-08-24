@@ -18,6 +18,17 @@ from cinema.noise import FLICKER_TRACK
 from cinema.shimmer import HeatShimmer
 from cinema.smoke import SmokeSimulator, composite_over, smoke_rgba
 
+# Absolute (not auto-exposure-relative) ceiling below which a pixel is
+# "warm gas/plume," never "still-burning flame" -- comfortably above
+# smoke.py's own SOURCE_THRESHOLD_C=60 (where smoke starts accumulating
+# at all) and well under this kind of dataset's real flame-core
+# temperatures (300-450C, e.g. scene.py's own _flame_lean_for and
+# TestCandleMarker's candle-position checks both use >150C as "clearly
+# hot," and a real measured flame peak sits well above that). Used only
+# to gate _suppress_haze_over_smoke below -- everywhere else in this
+# module still reads the auto-exposure-normalized `t`, not raw degrees.
+HAZE_TEMP_CEILING_C = 150.0
+
 # 1/f flicker amplitude: fraction of tonemapped intensity the pink-noise
 # track can add/subtract per frame -- candle-like breathing, not a
 # strobing screen. Bumped slightly from the original 0.05 for a more
@@ -35,6 +46,35 @@ BLOOM_STRENGTH = 1.3
 # composited under smoke and fire.
 AMBIENT_STRENGTH = 0.05
 AMBIENT_TINT = np.array([46.0, 32.0, 24.0], dtype=np.float32)  # dim warm ember-brown
+
+
+def _suppress_haze_over_smoke(fire_rgba: np.ndarray, frame: np.ndarray,
+                               density: np.ndarray) -> np.ndarray:
+    """Damp fire_rgba's alpha wherever real smoke sits over a pixel that
+    isn't actually still-burning (frame < HAZE_TEMP_CEILING_C), so that
+    warm-but-not-flame gas reads as the smoke's own (grey) tint instead
+    of the FireLUT's orange.
+
+    Why absolute temperature, not alpha/opacity: a first version of this
+    gated on how transparent fire_rgba's own alpha already was (protect
+    near-opaque pixels, suppress near-transparent ones), reasoning that
+    the true flame body is the opaque part. That works for a typical
+    scenario, but a real, measured counter-example broke it: a strongly-
+    ventilated flame (candles=1, vod=2/HVAC, voc=1, both vents open)
+    burns at a genuinely lower peak temperature, which pulls the auto-
+    exposure ceiling down with it -- and on that compressed a scale, even
+    a modest 60-130C haze pixel (real smoke, nowhere near combustion)
+    lands at alpha=255, fully opaque, indistinguishable from true flame
+    by opacity alone. Raw degrees don't have that problem: 100C is 100C
+    regardless of what the rest of the frame is doing, so it's what
+    actually separates "haze the smoke should win" from "core the flame
+    should keep" in every scenario, not just the typical one."""
+    alpha = fire_rgba[..., 3].astype(np.float32) / 255.0
+    haze = frame < HAZE_TEMP_CEILING_C
+    suppress = np.where(haze, 1.0 - np.clip(density, 0.0, 1.0), 1.0)
+    out = fire_rgba.copy()
+    out[..., 3] = np.clip(alpha * suppress * 255.0, 0.0, 255.0).astype(np.uint8)
+    return out
 
 
 def _ambient_backdrop(shape: tuple) -> np.ndarray:
@@ -62,12 +102,28 @@ class AutoExposure:
         self._alpha = 1.0 / max(tau_frames, 1.0)
         self._percentile = percentile
         self.locked = False
+        self._snap_next = False
+
+    def snap_next(self) -> None:
+        """The next update() jumps straight to that frame's own target
+        instead of easing toward it over ~tau_frames calls -- used on a
+        real scenario switch (see EffectsPipeline.reset_exposure), where
+        the EMA would otherwise keep coasting on the *previous*
+        scenario's brightness ceiling for several frames, a real,
+        measured ~30% vmax swing that reads as the whole scene gradually
+        dimming/brightening right after the switch instead of snapping
+        to the new scenario's own level immediately."""
+        self._snap_next = True
 
     def update(self, frame: np.ndarray) -> float:
         if self.locked:
             return self.vmax
         target = float(np.percentile(frame, self._percentile))
-        self.vmax += self._alpha * (target - self.vmax)
+        if self._snap_next:
+            self.vmax = target
+            self._snap_next = False
+        else:
+            self.vmax += self._alpha * (target - self.vmax)
         return self.vmax
 
 
@@ -91,6 +147,37 @@ class EffectsPipeline:
         self._shimmer = HeatShimmer()
         self._ambient_backdrop: np.ndarray = None
 
+    def reset_smoke(self) -> None:
+        """Drop the smoke density buffer so the next render() call starts
+        it fresh (it lazily recreates when None, same as the shape-change
+        branch below already relies on) -- called on a real scenario
+        switch (see views.SliceView.reset_cinema_simulators) so smoke
+        that accumulated against the *previous* scenario doesn't keep
+        drifting/decaying on screen after the temperature field
+        underneath it has already changed (e.g. a public-mode candle-
+        count change leaving a residual haze at the removed candle's
+        position). Flicker/shimmer state is untouched -- those track the
+        image's own motion generically, not a specific scenario's
+        spatial layout. Exposure is a different story (see
+        reset_exposure): its vmax ceiling is a real EMA of *this*
+        scenario's own brightness, and carrying the old one over is
+        exactly the kind of scenario-specific staleness this method
+        exists to clear -- callers reset both together (see
+        views.SliceView.reset_cinema_simulators)."""
+        self._smoke = None
+
+    def reset_exposure(self) -> None:
+        """Make the very next render() snap its auto-exposure ceiling
+        straight to the new scenario's own first frame instead of
+        coasting in from the *previous* scenario's vmax over the usual
+        ~tau_frames EMA window -- called alongside reset_smoke() on a
+        real scenario switch. Measured effect of skipping this: vmax
+        swinging ~145 -> ~86 -> back to ~110 over the next ~10 frames
+        after a 2-candle -> 1-candle switch, reading as the whole scene
+        gradually dimming/brightening right after the change rather than
+        the new scenario's own brightness simply appearing outright."""
+        self.exposure.snap_next()
+
     def render(self, frame: np.ndarray, hrr_intensity: float = 1.0,
                velocity_frame: np.ndarray = None) -> np.ndarray:
         """hrr_intensity: a scenario's current HRR(t) normalized to its own
@@ -113,15 +200,24 @@ class EffectsPipeline:
         self._flicker_i += 1
         t = np.clip(t * (1.0 + FLICKER_AMPLITUDE * hrr_intensity * flicker), 0.0, 1.0)
 
-        idx = (t * (len(FIRE_RGBA_LUT) - 1)).astype(np.uint8)
-        fire_rgba = FIRE_RGBA_LUT[idx]
-        fire_rgba = apply_bloom(fire_rgba, t, strength=BLOOM_STRENGTH * hrr_intensity)
-
         if self._smoke is None or self._smoke.buffer.shape != frame.shape:
             self._smoke = SmokeSimulator(frame.shape, ambient_c=self.vmin)
         if self._ambient_backdrop is None or self._ambient_backdrop.shape[:2] != frame.shape:
             self._ambient_backdrop = _ambient_backdrop(frame.shape)
         density = self._smoke.step(frame, velocity_frame)
+
+        idx = (t * (len(FIRE_RGBA_LUT) - 1)).astype(np.uint8)
+        fire_rgba = FIRE_RGBA_LUT[idx]
+        fire_rgba = apply_bloom(fire_rgba, t, strength=BLOOM_STRENGTH * hrr_intensity)
+        # Damp whatever's left of fire_rgba's alpha over real smoke that
+        # isn't actually still-burning (see _suppress_haze_over_smoke's
+        # own docstring for the real, measured combo that needed this) --
+        # applied to the fully-composed fire layer (LUT + bloom both
+        # already in) so one pass covers both an orange bloom-glow spill
+        # and an orange *intrinsic* LUT color, rather than two separate,
+        # partial fixes.
+        fire_rgba = _suppress_haze_over_smoke(fire_rgba, frame, density)
+
         composited = composite_over(smoke_rgba(density), self._ambient_backdrop)
         composited = composite_over(fire_rgba, composited)
         composited = self._shimmer.warp(composited, frame, self.vmin)

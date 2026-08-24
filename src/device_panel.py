@@ -1,8 +1,9 @@
 """Device panel (V6-M2 Virtual Device Network), an Analysis-page tab.
 
 Turns "visualizing fields" into "instrumenting a simulation like an
-experiment": place a virtual thermocouple, heat detector, or RTI sprinkler
-at a physical point and see its measurement evolve. Same interaction
+experiment": place a virtual thermocouple, heat detector, RTI sprinkler, or
+photoelectric smoke detector at a physical point and see its measurement
+evolve. Same interaction
 convention as the Measurement Tools panel (measurement_panel.py) -- a
 locator heatmap you click on -- so placing a device is the same gesture as
 placing a probe, just producing a devices.py Device instead of a
@@ -32,7 +33,7 @@ import devices as dv
 
 _PLANE_AXES = ("y", "x", "z")   # y first: the app's default/verified plane
 
-_PREFIX = {"thermocouple": "TC", "heat_detector": "HD", "sprinkler": "SP"}
+_PREFIX = {"thermocouple": "TC", "heat_detector": "HD", "sprinkler": "SP", "smoke_detector": "SD"}
 
 # Scientific, non-decorative state colors: neutral reading vs. activated.
 _COLOR_IDLE = "#3DA5FF"
@@ -52,7 +53,7 @@ class DevicePanel(QtWidgets.QWidget):
         self._data = None      # TEMPERATURE background for the locator canvas
         self._extent = None
         self._devices: list = []
-        self._counters = {"thermocouple": 0, "heat_detector": 0, "sprinkler": 0}
+        self._counters = {"thermocouple": 0, "heat_detector": 0, "sprinkler": 0, "smoke_detector": 0}
         self._loc_ax = None
 
         layout = QtWidgets.QVBoxLayout(self)
@@ -73,6 +74,12 @@ class DevicePanel(QtWidgets.QWidget):
         self.type_combo.setToolTip("The device type the next map click will place")
         for t in dv.KINDS:
             self.type_combo.addItem(dv.KIND_LABELS[t], t)
+            if t == "smoke_detector":
+                self.type_combo.setItemData(
+                    self.type_combo.count() - 1,
+                    "Estimated photoelectric/optical response from SOOT DENSITY (Beer-Lambert "
+                    "obscuration); not an ionization-detector model, not a certified device.",
+                    QtCore.Qt.ToolTipRole)
         header.addWidget(self.type_combo)
         # V6-M5: which plane new devices read. Y is the app's verified
         # plane (offset 0 or 15, both real); X/Z are offered because the
@@ -124,7 +131,7 @@ class DevicePanel(QtWidgets.QWidget):
         btns = QtWidgets.QVBoxLayout()
         _TOOLTIPS = {
             "device-rename": "Rename the selected device",
-            "device-edit": "Edit RTI/activation-temperature parameters and recompute",
+            "device-edit": "Edit this device's parameters and recompute",
             "device-jump": "Reveal this device's result across the app (Live Viewer, Graph, Context)",
             "device-export": "Export this device's time series as CSV",
             "device-delete": "Delete the selected device",

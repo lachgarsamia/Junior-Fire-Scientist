@@ -31,6 +31,22 @@ class EmberParticles:
         self.life = np.zeros((0,), dtype=np.float32)
         self.size = np.zeros((0,), dtype=np.float32)
 
+    def reset(self) -> None:
+        """Clear every live particle -- called on a real scenario switch
+        (see SliceView.reset_cinema_simulators) so embers spawned against
+        the *previous* scenario's hot spots don't keep drifting/fading
+        on screen after the temperature field underneath them has
+        already changed (e.g. a public-mode candle-count switch removing
+        a burner: its embers would otherwise linger for their own
+        LIFETIME_FRAMES, reading as a leftover flame at a position the
+        new scenario has no fire at all). Same empty-array shape as a
+        fresh __init__, just without reallocating self._rng."""
+        self.pos = np.zeros((0, 2), dtype=np.float32)
+        self.vel = np.zeros((0, 2), dtype=np.float32)
+        self.age = np.zeros((0,), dtype=np.float32)
+        self.life = np.zeros((0,), dtype=np.float32)
+        self.size = np.zeros((0,), dtype=np.float32)
+
     def step(self, temperature_frame: np.ndarray, ambient_c: float, velocity_frame: np.ndarray = None) -> None:
         self._advect()
         self._cull()

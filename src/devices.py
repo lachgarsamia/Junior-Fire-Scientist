@@ -3,7 +3,7 @@ point and get a physically meaningful, traceable measurement -- turning the
 app from "visualizing fields" into "instrumenting a simulation like an
 experiment".
 
-Three device types, each a deterministic reduction of existing fields at a
+Four device types, each a deterministic reduction of existing fields at a
 point. No new physics model, no guessed inputs, no AI interpretation:
 
 - thermocouple: samples TEMPERATURE at (x, z); reports the full history,
@@ -17,6 +17,13 @@ point. No new physics model, no guessed inputs, no AI interpretation:
   field (VELOCITY). Falls back to a clearly-labelled reduced model (u held
   at 1.0 m/s) when velocity data isn't available -- it never invents a
   measured velocity.
+- smoke_detector: an estimated PHOTOELECTRIC/OPTICAL detector response,
+  Cs = Km*rho_soot (the standard mass-extinction relationship) applied to
+  the real SOOT DENSITY field, compared against a representative
+  obscuration threshold. See compute_smoke_detector's own docstring for
+  full physics, provenance, and scope (photoelectric only -- deliberately
+  no ionization-detector model, see that docstring's "why not ionization"
+  note).
 
 Reuses QuantityProvider.get/get_extent (so a device reads TEMPERATURE RISE,
 a Field-Calculator field, or any other registered quantity exactly like any
@@ -39,22 +46,101 @@ from slice_key import SliceKey, DEFAULT_DIRECTION, DEFAULT_OFFSET
 import measure as mz
 import tenability as tn
 
-KINDS = ("thermocouple", "heat_detector", "sprinkler")
+KINDS = ("thermocouple", "heat_detector", "sprinkler", "smoke_detector")
 KIND_LABELS = {"thermocouple": "Thermocouple", "heat_detector": "Heat detector",
-               "sprinkler": "Sprinkler (RTI)"}
+               "sprinkler": "Sprinkler (RTI)",
+               "smoke_detector": "Smoke Detector (Photoelectric, est.)"}
 
 TC_THRESHOLDS = (60.0, 100.0, 300.0)   # standard thermocouple report bands, deg C
 
+# ------------------------------------------------------- smoke-detector physics
+# Mass extinction coefficient for smoke from FLAMING combustion: Cs =
+# Km * rho_soot. Km = 8700 m^2/kg is a real, literature-cited engineering
+# constant -- Mulholland, G.W., "Smoke Production and Properties," SFPE
+# Handbook of Fire Protection Engineering -- not an invented application
+# parameter. It is also, independently, the same value FDS itself uses
+# internally (its own MASS_EXTINCTION_COEFFICIENT default) to compute its
+# native VISIBILITY quantity from soot mass concentration -- see the FDS
+# Technical Reference Guide. This module does not reproduce FDS's
+# VISIBILITY calculation and does not claim to match it exactly; it
+# applies the same established physics to the SOOT DENSITY field this app
+# already has, independently of whatever FDS itself may have computed
+# (VISIBILITY is a separate, gated-on-M-SIM quantity here -- see
+# registry.py -- not derived from this).
+#
+# Km is only well-established for the FLAMING-fire regime. Smoldering/
+# pyrolysis smoke has a different, less certain extinction coefficient
+# (literature reports a wider range, commonly ~4000-10000 m^2/kg
+# depending on fuel) that this module does not attempt to model. This
+# dataset's candle fires are small flaming fires, reasonably within the
+# regime Km=8700 was characterized for -- but this is a physical
+# assumption, not a universal constant, and is stated explicitly in every
+# result's own basis string rather than left implicit.
+MASS_EXTINCTION_COEFFICIENT_M2_PER_KG = 8700.0
+
+# SOOT DENSITY is stored/displayed in mg/m^3 (see load_data.py's own
+# SOOT_DISPLAY_SCALE comment for why); the mass-extinction formula above
+# needs kg/m^3. A pure unit conversion -- 1 mg/m^3 = 1e-6 kg/m^3 -- kept
+# as its own named constant (rather than an inline "* 1e-6") specifically
+# because silently treating mg/m^3 as kg/m^3 would be a real, six-orders-
+# of-magnitude error; see tests/test_devices.py's own conversion test.
+MG_M3_TO_KG_M3 = 1.0e-6
+
+# A representative photoelectric smoke-detector sensitivity -- NOT a
+# certified value for any specific listed product. NFPA 72 (field
+# sensitivity testing) and UL 217 (listing requirements) together treat
+# roughly 0.5-4.0% obscuration per foot as the range within which a
+# correctly functioning photoelectric detector's installed sensitivity is
+# expected to fall; ~2.5%/ft, near the middle of that range, is commonly
+# used in fire-protection-engineering discussions as a representative
+# figure and is what this module defaults to. This plays exactly the same
+# role compute_sprinkler's RTI=100 and activation_temp=68 C defaults
+# play: a typical, literature-grounded starting point, not a claim about
+# any one real device -- override it via the smoke_threshold_obscuration_
+# per_ft parameter (same user-adjustable-parameters pattern the sprinkler
+# already uses) for a specific detector's actual listed sensitivity.
+DEFAULT_SMOKE_THRESHOLD_OBSCURATION_PER_FT = 2.5
+
+_FT_TO_M = 0.3048   # definitional unit conversion (international foot), not a detector-geometry claim
+
+# A 1 m reference path used ONLY to express the extinction coefficient as
+# a human-readable "% obscuration per metre" for display/basis purposes.
+# The activation *comparison* itself never uses this -- it compares
+# extinction coefficients (Cs, 1/m) directly, see
+# _cs_threshold_per_m_from_pct_per_ft -- so no detector chamber geometry
+# is assumed anywhere in the activation logic itself (see
+# compute_smoke_detector's own "detector geometry" note).
+_DISPLAY_REFERENCE_PATH_M = 1.0
+
+# SOOT DENSITY is a volumetric `.s3d` read: unlike TEMPERATURE/VELOCITY
+# (`.sf` slices, keyed by an integer mesh-cell `offset`), it is only ever
+# registered under a SliceKey carrying a physical `plane_pos` (see
+# SliceKey's own docstring and QuantityProvider._ensure_plane_available) --
+# without one, the plane simply is not in the .smv-derived inventory and
+# every read is gated. These are the same two real, already-extracted SOOT
+# planes main_window.py offers in the Quantities dropdown (main_window.py's
+# `_SOOT_PLANES`) -- not an invented geometry; a smoke detector placed on
+# any other direction (e.g. z) is not backed by an extracted plane and
+# gates cleanly via the existing GatedQuantityError, exactly like placing
+# any other device type on an unavailable plane.
+_SOOT_PLANE_POS_BY_DIRECTION = {1: 0.0, 0: 0.25}   # y=0 side view, x=0.25 doorway
+
 
 def probe_series(provider, scenario: int, quantity: str, x: float, z: float,
-                 direction: int = DEFAULT_DIRECTION, offset: int = DEFAULT_OFFSET) -> np.ndarray:
+                 direction: int = DEFAULT_DIRECTION, offset: int = DEFAULT_OFFSET,
+                 plane_pos: Optional[float] = None) -> np.ndarray:
     """The full (t,) time series of `quantity` at physical (x, z) on the
     given plane (V6-M5: direction/offset, defaulting to the app's usual
     plane), read through the QuantityProvider -- native, derived, or
     calculated, whatever is registered -- and bilinearly interpolated at
     the point each frame. An unavailable plane raises GatedQuantityError
-    (from the provider), never silently falls back to a different one."""
-    key = SliceKey(quantity, direction, offset)
+    (from the provider), never silently falls back to a different one.
+
+    `plane_pos` (default None, unchanged for every pre-existing caller) is
+    the physical position a volumetric `.s3d` quantity (SOOT DENSITY) needs
+    on its SliceKey -- see SliceKey's own docstring; a `.sf` quantity like
+    TEMPERATURE/VELOCITY never sets it."""
+    key = SliceKey(quantity, direction, offset, plane_pos)
     data = np.asarray(provider.get(scenario, key))
     extent = provider.get_extent(scenario, key)
     return np.array([mz.probe_value(data[k], extent, x, z) for k in range(data.shape[0])])
@@ -187,6 +273,139 @@ def compute_sprinkler(provider, scenario: int, x: float, z: float, fps: int,
     }
 
 
+# ------------------------------------------------------- smoke-detector math
+# Small, individually-testable pure functions (no provider, no I/O) --
+# compute_smoke_detector below is just these three composed with
+# probe_series/_crossing_time, the same shape as compute_heat_detector.
+def soot_density_kg_per_m3(soot_density_mg_per_m3) -> np.ndarray:
+    """mg/m^3 (SOOT DENSITY's own display/storage unit) -> kg/m^3 (what
+    the mass-extinction formula needs). See MG_M3_TO_KG_M3's own comment
+    for why this is kept as an explicit, separately-tested step rather
+    than folded into extinction_coefficient_per_m below."""
+    return np.asarray(soot_density_mg_per_m3, dtype=float) * MG_M3_TO_KG_M3
+
+
+def extinction_coefficient_per_m(
+        soot_density_mg_per_m3,
+        km_m2_per_kg: float = MASS_EXTINCTION_COEFFICIENT_M2_PER_KG) -> np.ndarray:
+    """Cs = Km * rho_soot, in 1/m -- the mass-extinction relationship
+    itself (see MASS_EXTINCTION_COEFFICIENT_M2_PER_KG's own comment for
+    Km's provenance). `soot_density_mg_per_m3` is in the app's own
+    display unit; converted to kg/m^3 internally."""
+    return km_m2_per_kg * soot_density_kg_per_m3(soot_density_mg_per_m3)
+
+
+def obscuration_percent_per_reference_path(
+        cs_per_m, path_length_m: float = _DISPLAY_REFERENCE_PATH_M) -> np.ndarray:
+    """Beer-Lambert obscuration, as a percentage, over `path_length_m`:
+    100*(1 - exp(-Cs*L)). For DISPLAY only (a human-readable "how obscured
+    would a 1 m path be" figure) -- the activation threshold comparison
+    in compute_smoke_detector does not use this; it compares extinction
+    coefficients directly (see _cs_threshold_per_m_from_pct_per_ft) so no
+    detector-chamber path length is assumed there."""
+    cs = np.asarray(cs_per_m, dtype=float)
+    return 100.0 * (1.0 - np.exp(-cs * path_length_m))
+
+
+def _cs_threshold_per_m_from_pct_per_ft(pct_per_ft: float) -> float:
+    """A detector sensitivity given in %/ft (the conventional NFPA 72 /
+    UL 217 unit, see DEFAULT_SMOKE_THRESHOLD_OBSCURATION_PER_FT's own
+    comment) -> an extinction coefficient in 1/m, so the activation
+    comparison operates on Cs directly -- a purely physical, path-
+    independent quantity -- rather than re-applying Beer-Lambert with an
+    assumed detector-chamber optical path. 1 ft = 0.3048 m is a plain
+    unit conversion, not a claim about any detector's real geometry (see
+    compute_smoke_detector's own "detector geometry" note)."""
+    pct_per_ft = max(0.0, min(99.999, float(pct_per_ft)))
+    transmittance_per_ft = 1.0 - pct_per_ft / 100.0
+    cs_per_ft = -np.log(transmittance_per_ft)
+    return float(cs_per_ft / _FT_TO_M)
+
+
+def compute_smoke_detector(provider, scenario: int, x: float, z: float, fps: int,
+                           smoke_threshold_obscuration_per_ft: float =
+                           DEFAULT_SMOKE_THRESHOLD_OBSCURATION_PER_FT,
+                           km_m2_per_kg: float = MASS_EXTINCTION_COEFFICIENT_M2_PER_KG,
+                           direction: int = DEFAULT_DIRECTION, offset: int = DEFAULT_OFFSET) -> dict:
+    """Estimated PHOTOELECTRIC/OPTICAL smoke detector response.
+
+    Photoelectric detectors respond to light scattering/extinction caused
+    by smoke particles -- physically the same phenomenon as optical
+    obscuration, which SOOT DENSITY (a real mass concentration) supports
+    estimating via the standard mass-extinction relationship:
+
+        Cs = Km * rho_soot          (extinction coefficient, 1/m)
+
+    See MASS_EXTINCTION_COEFFICIENT_M2_PER_KG's own comment for Km's
+    provenance (Mulholland/NIST; also FDS's own internal default for its
+    unrelated, gated-here VISIBILITY quantity) and its flaming-fire-
+    regime limitation. Activation compares Cs against the extinction
+    coefficient equivalent to `smoke_threshold_obscuration_per_ft`, a
+    representative (not certified) photoelectric sensitivity -- see
+    DEFAULT_SMOKE_THRESHOLD_OBSCURATION_PER_FT's own comment.
+
+    Deliberately NOT an ionization-detector model, and this module makes
+    no attempt to approximate one: ionization response depends on smoke
+    particle *number concentration and size distribution*, not mass
+    concentration -- information SOOT DENSITY alone cannot defensibly
+    recover (it's exactly why real ionization and photoelectric detectors
+    respond differently to the same fire -- ionization detectors trend
+    more sensitive to the small, numerous particles typical of flaming
+    fires; photoelectric to the larger particles typical of smoldering
+    ones). Extending this function to ionization would require inventing
+    a particle-size assumption with no basis in the available data.
+
+    Detector geometry: this function does not model any detector's
+    physical sensing-chamber geometry (there is none in this dataset to
+    model). The 1 ft used to interpret the threshold, and the 1 m used
+    for the display-only obscuration_pct_per_m series, are both plain
+    reference lengths for unit conversion/human-readable display, not
+    claims about a real detector's optical path.
+
+    Result is an engineering ESTIMATE, not a measured or certified
+    detector response -- see the `basis` string below, and never presented
+    elsewhere in the app as one.
+    """
+    fps = max(1, fps)
+    plane_pos = _SOOT_PLANE_POS_BY_DIRECTION.get(direction)
+    soot_mg_m3 = probe_series(provider, scenario, "SOOT DENSITY", x, z, direction, offset,
+                              plane_pos=plane_pos)
+    n = soot_mg_m3.shape[0]
+    time_s = np.arange(n) / fps
+    cs_per_m = extinction_coefficient_per_m(soot_mg_m3, km_m2_per_kg)
+    obscuration_pct_per_m = obscuration_percent_per_reference_path(cs_per_m)
+    cs_threshold_per_m = _cs_threshold_per_m_from_pct_per_ft(smoke_threshold_obscuration_per_ft)
+    t_act = _crossing_time(cs_per_m, fps, cs_threshold_per_m)
+    frame_act = int(round(t_act * fps)) if t_act is not None else None
+    basis = (
+        "Estimated photoelectric-type optical obscuration from SOOT DENSITY: "
+        f"Cs = Km*rho_soot, Km={km_m2_per_kg:g} m²/kg (Mulholland/NIST, flaming-"
+        "fire regime -- the same constant FDS itself uses internally for its own "
+        "VISIBILITY quantity, though this is not FDS's VISIBILITY calculation "
+        "and does not claim to reproduce it). Activation threshold: "
+        f"{smoke_threshold_obscuration_per_ft:g} %/ft (a representative NFPA 72 "
+        "/ UL 217 photoelectric sensitivity figure, not a certified spec for any "
+        f"listed product), equivalent to Cs>={cs_threshold_per_m:.4g} 1/m. This is "
+        "an engineering estimate, not a measured or certified detector response. "
+        "Photoelectric/optical model only -- ionization detection is not modeled "
+        "(soot mass concentration alone cannot defensibly recover the particle-"
+        "number/size information ionization response depends on)."
+    )
+    return {
+        "time_s": time_s.tolist(),
+        "soot_density_mg_m3": np.asarray(soot_mg_m3, dtype=float).tolist(),
+        "extinction_coefficient_per_m": cs_per_m.tolist(),
+        "obscuration_pct_per_m": obscuration_pct_per_m.tolist(),
+        "activated": t_act is not None,
+        "activation_time_s": t_act,
+        "activation_frame": frame_act,
+        "smoke_threshold_obscuration_per_ft": float(smoke_threshold_obscuration_per_ft),
+        "threshold_extinction_coefficient_per_m": cs_threshold_per_m,
+        "detector_model": "photoelectric_optical_estimate",
+        "basis": basis,
+    }
+
+
 _COMPUTE = {
     "thermocouple": lambda provider, dev, fps: compute_thermocouple(
         provider, dev.scenario, dev.position[0], dev.position[1], fps,
@@ -201,12 +420,18 @@ _COMPUTE = {
         rti=dev.parameters.get("rti", 100.0),
         activation_temp=dev.parameters.get("activation_temp_C", 68.0),
         direction=dev.direction, offset=dev.offset),
+    "smoke_detector": lambda provider, dev, fps: compute_smoke_detector(
+        provider, dev.scenario, dev.position[0], dev.position[1], fps,
+        smoke_threshold_obscuration_per_ft=dev.parameters.get(
+            "smoke_threshold_obscuration_per_ft", DEFAULT_SMOKE_THRESHOLD_OBSCURATION_PER_FT),
+        direction=dev.direction, offset=dev.offset),
 }
 
 _DEFAULT_PARAMETERS = {
     "thermocouple": {},
     "heat_detector": {"activation_temp_C": 74.0},
     "sprinkler": {"rti": 100.0, "activation_temp_C": 68.0},
+    "smoke_detector": {"smoke_threshold_obscuration_per_ft": DEFAULT_SMOKE_THRESHOLD_OBSCURATION_PER_FT},
 }
 
 
@@ -218,7 +443,7 @@ def default_parameters(device_type: str) -> dict:
 class Device:
     id: str
     name: str
-    type: str                        # thermocouple | heat_detector | sprinkler
+    type: str                        # thermocouple | heat_detector | sprinkler | smoke_detector
     scenario: int                    # which case this device is placed in
     position: tuple                  # physical (x, z), metres
     parameters: dict = field(default_factory=dict)
@@ -242,9 +467,13 @@ class Device:
         during playback without recomputing anything."""
         r = self.results or {}
         temp = r.get("temperature_C") or r.get("link_temperature_C")
-        i = min(max(frame_index, 0), len(temp) - 1) if temp else 0
-        out = {"temperature_C": float(temp[i]) if temp else None}
-        if self.type in ("heat_detector", "sprinkler"):
+        n = len(r.get("time_s", [])) or (len(temp) if temp else 0)
+        i = min(max(frame_index, 0), n - 1) if n else 0
+        out = {"temperature_C": float(temp[i]) if temp and i < len(temp) else None}
+        if self.type == "smoke_detector":
+            obscuration = r.get("obscuration_pct_per_m")
+            out["obscuration_pct_per_m"] = float(obscuration[i]) if obscuration and i < len(obscuration) else None
+        if self.type in ("heat_detector", "sprinkler", "smoke_detector"):
             frame_act = r.get("activation_frame")
             out["active"] = frame_act is not None and i >= frame_act
         return out
@@ -281,13 +510,22 @@ class Device:
                 category="event", quantity="TEMPERATURE",
                 location=tuple(self.position), value=r["max_temperature_C"], unit="°C",
                 basis=r["basis"])
-        kind = "Heat detector" if self.type == "heat_detector" else "Sprinkler"
+        if self.type == "smoke_detector":
+            kind, quantity, unit = "Smoke detector (photoelectric, est.)", "SOOT DENSITY", "%/m"
+        elif self.type == "heat_detector":
+            kind, quantity, unit = "Heat detector", "TEMPERATURE", "°C"
+        else:
+            kind, quantity, unit = "Sprinkler", "TEMPERATURE", "°C"
         t = r.get("activation_time_s")
         if t is None:
             return Insight(statement=f"{kind} {self.name} did not activate.",
-                           category="event", quantity="TEMPERATURE",
+                           category="event", quantity=quantity,
                            location=tuple(self.position), basis=r.get("basis", ""))
-        if self.type == "heat_detector":
+        if self.type == "smoke_detector":
+            frame_act = r.get("activation_frame")
+            obscuration = r.get("obscuration_pct_per_m") or []
+            temp_at = float(obscuration[frame_act]) if frame_act is not None and frame_act < len(obscuration) else None
+        elif self.type == "heat_detector":
             temp_at = r.get("activation_temperature_C")
         else:
             frame_act = r.get("activation_frame")
@@ -295,10 +533,11 @@ class Device:
             temp_at = float(link[frame_act]) if frame_act is not None and frame_act < len(link) else None
         statement = f"{kind} {self.name} activated at {t:.1f} s"
         if temp_at is not None:
-            statement += f" (temperature {temp_at:.1f} °C)"
+            label = "obscuration" if self.type == "smoke_detector" else "temperature"
+            statement += f" ({label} {temp_at:.1f} {unit})"
         return Insight(
-            statement=statement, category="event", quantity="TEMPERATURE",
-            time_s=float(t), location=tuple(self.position), value=temp_at, unit="°C",
+            statement=statement, category="event", quantity=quantity,
+            time_s=float(t), location=tuple(self.position), value=temp_at, unit=unit,
             basis=r.get("basis", ""))
 
     def to_dict(self) -> dict:

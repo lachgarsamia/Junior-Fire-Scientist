@@ -78,8 +78,8 @@ TRANSLATIONS = {
     "meter_airflow_not_measured": {"en": "not measured here", "de": "hier nicht gemessen"},
     "thermometer_default_caption": {"en": "🌡️ TEMPERATURE", "de": "🌡️ TEMPERATUR"},
     "thermometer_mean_caption": {"en": "🌡️ Whole room average", "de": "🌡️ Ganzer Raum, Durchschnitt"},
-    "thermometer_at_flame": {"en": "🔥 At the flame", "de": "🔥 An der Flamme"},
-    "thermometer_hot_spot": {"en": "🔥 Hot spot", "de": "🔥 Heiße Stelle"},
+    "thermometer_at_flame": {"en": "🕯️ At the flame", "de": "🕯️ An der Flamme"},
+    "thermometer_hot_spot": {"en": "🌡️ Hot spot", "de": "🌡️ Heiße Stelle"},
     "thermometer_cool_spot": {"en": "🧊 Cool spot", "de": "🧊 Kühle Stelle"},
     "help_button": {"en": "What am I seeing?", "de": "Was sehe ich hier?"},
     "pause_button": {"en": "Pause", "de": "Pause"},
@@ -111,17 +111,17 @@ TRANSLATIONS = {
     "games_hub_say": {"en": "🎮 Pick a challenge!", "de": "🎮 Wähle eine Herausforderung!"},
 
     # -- Game screens: prompts and action pills -------------------------
-    "prompt_temp_hunt": {"en": "🔥  TEMP HUNT", "de": "🔥  TEMPERATUR-SUCHE"},
+    "prompt_temp_hunt": {"en": "🌡️  TEMP HUNT", "de": "🌡️  TEMPERATUR-SUCHE"},
     "prompt_hot_cold": {"en": "🧊  HOT OR COLD?", "de": "🧊  HEISS ODER KALT?"},
     "prompt_mystery": {"en": "🔎  CAN YOU FIGURE IT OUT?", "de": "🔎  KANNST DU ES HERAUSFINDEN?"},
     "prompt_compare": {"en": "📊  COMPARE", "de": "📊  VERGLEICHEN"},
     "prompt_map_it": {"en": "🗺️  MAP IT", "de": "🗺️  KARTE ERSTELLEN"},
-    "hotcold_find_hot": {"en": "Find somewhere HOT 🔥", "de": "Finde eine HEISSE Stelle 🔥"},
+    "hotcold_find_hot": {"en": "Find somewhere HOT 🌡️", "de": "Finde eine HEISSE Stelle 🌡️"},
     "hotcold_find_cool": {"en": "Now find somewhere COOL 🧊", "de": "Finde jetzt eine KÜHLE Stelle 🧊"},
     "hotcold_try_again": {"en": "Tap anywhere to try again!", "de": "Tippe irgendwo, um es nochmal zu versuchen!"},
     "temp_hunt_find_hottest": {
-        "en": "🔥 Where do you think it's hottest? Touch the firebox to find out!",
-        "de": "🔥 Wo ist es wohl am heißesten? Berühre die Feuerstelle, um es herauszufinden!"},
+        "en": "🌡️ Where do you think it's hottest? Touch the firebox to find out!",
+        "de": "🌡️ Wo ist es wohl am heißesten? Berühre die Feuerstelle, um es herauszufinden!"},
     "temp_hunt_find_coolest": {"en": "🧊 Can you find the COOLEST place?",
                               "de": "🧊 Findest du die KÜHLSTE Stelle?"},
     "mystery_hint": {
@@ -168,11 +168,11 @@ TRANSLATIONS = {
                             "de": "💨 Größere Punkte bedeuten, dass sich die Luft schneller bewegt."},
     "seeing_colors": {"en": "🎨 Brighter colours mean hotter air.",
                       "de": "🎨 Hellere Farben bedeuten heißere Luft."},
-    "seeing_flame": {"en": "🔥 The bright part is the flame and the hot air above it.",
-                     "de": "🔥 Der helle Teil ist die Flamme und die heiße Luft darüber."},
+    "seeing_flame": {"en": "🕯️ The bright part is the flame and the hot air above it.",
+                     "de": "🕯️ Der helle Teil ist die Flamme und die heiße Luft darüber."},
 
     # -- Attract screen ---------------------------------------------------
-    "attract_prompt": {"en": "🔥  FIRE EXPLORER", "de": "🔥  FEUER-ENTDECKER"},
+    "attract_prompt": {"en": "🕯️  FIRE EXPLORER", "de": "🕯️  FEUER-ENTDECKER"},
     "attract_say": {"en": "Hi! I'm Ember. Come and explore a real fire!",
                     "de": "Hallo! Ich bin Ember. Komm und entdecke ein echtes Feuer!"},
     "attract_button": {"en": "EXPLORE THE FIRE", "de": "FEUER ENTDECKEN"},
@@ -209,22 +209,22 @@ TRANSLATIONS = {
     "airflow_reacted_say": {"en": "Whoa — look at the air move!",
                             "de": "Wow — schau, wie sich die Luft bewegt!"},
     "look_closely": {"en": "Look closely…", "de": "Schau genau hin…"},
-    "candle_hottest_try_elsewhere": {"en": "🔥 That's the hottest part — try somewhere else!",
-                                     "de": "🔥 Das ist die heißeste Stelle — versuch es woanders!"},
+    "candle_hottest_try_elsewhere": {"en": "🕯️ That's the hottest part — try somewhere else!",
+                                     "de": "🕯️ Das ist die heißeste Stelle — versuch es woanders!"},
     "candle_burning_with_nudge": {
-        "en": "🔥 That's the candle burning — the flame is where the heat starts! "
+        "en": "🕯️ That's the candle burning — the flame is where the heat starts! "
               "What happens if we change the fire?",
-        "de": "🔥 Das ist die brennende Kerze — an der Flamme entsteht die Hitze! "
+        "de": "🕯️ Das ist die brennende Kerze — an der Flamme entsteht die Hitze! "
               "Was passiert, wenn wir das Feuer verändern?"},
-    "candle_burning": {"en": "🔥 That's the candle burning — the flame is where the heat starts!",
-                       "de": "🔥 Das ist die brennende Kerze — an der Flamme entsteht die Hitze!"},
+    "candle_burning": {"en": "🕯️ That's the candle burning — the flame is where the heat starts!",
+                       "de": "🕯️ Das ist die brennende Kerze — an der Flamme entsteht die Hitze!"},
 
     # -- experience.py: Dr. Funke's fact bank (general fire science,
     # never a claim about this run's own measurements) ------------------
     "scientist_name": {"en": "Dr. Frieda Funke", "de": "Dr. Frieda Funke"},
-    # Kept short on purpose: Dr. Funke's own thought bubble lives in a
-    # small gutter strip above the thermometer (see PublicOverlay.
-    # _position_thought_bubble), not a full-width caption -- a first,
+    # Kept short on purpose: Dr. Funke's own speech bubble lives in a
+    # narrow sidebar pocket below the thermometer (see PublicOverlay.
+    # _position_scientist_bubble), not a full-width caption -- a first,
     # more sentence-length pass of these overflowed that space in a
     # real screenshot.
     "fact_hot_air_rises": {
@@ -236,9 +236,6 @@ TRANSLATIONS = {
     "fact_fire_triangle": {
         "en": "Fire needs fuel, oxygen, and heat.",
         "de": "Feuer braucht Brennstoff, Sauerstoff, Hitze."},
-    "fact_flame_temperature": {
-        "en": "A candle flame can top 1,000°C.",
-        "de": "Eine Kerzenflamme wird über 1.000°C heiß."},
     "fact_moving_air_oxygen": {
         "en": "Moving air feeds a flame more oxygen.",
         "de": "Bewegte Luft gibt der Flamme mehr Sauerstoff."},
@@ -312,8 +309,8 @@ TRANSLATIONS = {
         "de": "Du hast die {target} Stelle im Raum gefunden — {value:.0f}°C."},
     "hotcold_diff_big": {"en": "BIG difference!", "de": "GROSSER Unterschied!"},
     "hotcold_diff_small": {"en": "Almost the same!", "de": "Fast gleich!"},
-    "hotcold_say": {"en": "🔥 {hot:.0f}°C vs 🧊 {cool:.0f}°C — {diff}",
-                    "de": "🔥 {hot:.0f}°C vs 🧊 {cool:.0f}°C — {diff}"},
+    "hotcold_say": {"en": "🌡️ {hot:.0f}°C vs 🧊 {cool:.0f}°C — {diff}",
+                    "de": "🌡️ {hot:.0f}°C vs 🧊 {cool:.0f}°C — {diff}"},
     "hotcold_discovery_title": {"en": "HOT VS COOL", "de": "HEISS VS KALT"},
     "hotcold_discovery_text": {
         "en": "One spot was {hot:.0f}°C, another was {cool:.0f}°C — a big difference!",
@@ -335,9 +332,9 @@ TRANSLATIONS = {
         "en": "❄️ Interesting! The air up here got cooler. What about down here?",
         "de": "❄️ Interessant! Die Luft hier oben ist kühler geworden. Wie ist es weiter unten?"},
     "mystery_progress_floor": {
-        "en": "🔥 Wait… it got warmer down here! What about up there?",
-        "de": "🔥 Warte… hier unten ist es wärmer geworden! Wie ist es weiter oben?"},
-    "verdict_much_hotter": {"en": "🔥 Much hotter here", "de": "🔥 Hier viel heißer"},
+        "en": "🌡️ Wait… it got warmer down here! What about up there?",
+        "de": "🌡️ Warte… hier unten ist es wärmer geworden! Wie ist es weiter oben?"},
+    "verdict_much_hotter": {"en": "🌡️ Much hotter here", "de": "🌡️ Hier viel heißer"},
     "verdict_much_cooler": {"en": "❄️ Much cooler here", "de": "❄️ Hier viel kühler"},
     "verdict_almost_same": {"en": "≈ Almost the same here", "de": "≈ Fast gleich hier"},
     "change_line_delta": {"en": "🌡️ {delta:.1f}°C {direction}", "de": "🌡️ {delta:.1f}°C {direction}"},
@@ -478,15 +475,32 @@ TRANSLATIONS = {
     "choice_fan_off_short": {"en": "Fan OFF", "de": "Ventilator AUS"},
 
     # -- experiments.py: EXPLORE_CONTROLS ---------------------------------
-    "control_fan_label": {"en": "Fan", "de": "Ventilator"},
+    # "Vent 1"/"Vent 2" (real vod/voc ceiling openings) and "Door" match
+    # the original FDS input files' own factor names exactly -- see
+    # manifest.py's _FACTORS and fds/generate_sim.py's vertical_opening_1/
+    # vertical_opening_2/door. "Fan" is no longer a control of its own:
+    # it's the real HVAC state of Vent 1 (vod=2), see option_fan_on below.
+    "control_vent1_label": {"en": "Vent 1", "de": "Lüftung 1"},
     "control_candles_label": {"en": "Candles", "de": "Kerzen"},
-    "control_vent2_label": {"en": "Vent", "de": "Lüftung"},
-    "option_off": {"en": "OFF", "de": "AUS"},
-    "option_on": {"en": "ON", "de": "AN"},
+    "control_vent2_label": {"en": "Vent 2", "de": "Lüftung 2"},
+    "control_door_label": {"en": "Door", "de": "Tür"},
     "option_one_candle": {"en": "1", "de": "1"},
     "option_two_candles": {"en": "2", "de": "2"},
     "option_vent_open": {"en": "OPEN", "de": "OFFEN"},
-    "option_vent_closed": {"en": "SHUT", "de": "ZU"},
+    # SHUT -> CLOSED, and FAN ON -> HVAC below: per explicit feedback,
+    # matching the original FDS input files' own terminology exactly
+    # (fds/generate_sim.py's vertical_opening_1/vertical_opening_2 =
+    # ["open", "closed", "HVAC"]/["open", "closed"]) rather than a kid-
+    # friendlier paraphrase of it.
+    "option_vent_closed": {"en": "CLOSED", "de": "GESCHLOSSEN"},
+    # The one state that's genuinely different physically (a real HVAC fan
+    # actually running), not just "more open" -- its own icon/label rather
+    # than reusing option_vent_open, so a child can tell it apart. "HVAC"
+    # kept untranslated in German too: it's the literal state name the
+    # input files themselves use, not descriptive prose.
+    "option_fan_on": {"en": "HVAC", "de": "HVAC"},
+    "option_door_narrow": {"en": "NARROW", "de": "SCHMAL"},
+    "option_door_wide": {"en": "WIDE", "de": "WEIT"},
 
     # -- experiments.py: PUBLIC_METRICS -----------------------------------
     "metric_stronger": {"en": "stronger", "de": "stärker"},

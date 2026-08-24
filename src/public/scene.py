@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
@@ -116,7 +117,12 @@ _CANDLE_TAP_RADIUS_M = 0.05
 # Fan housing + blades (Design Review §6 Priority 1: the fan should read
 # as a physical object at rest, not an effect that only exists while
 # active). Sized against the same 1.0 x 0.48 m domain the candle/flame
-# constants above are scaled to.
+# constants above are scaled to. Vent 2 uses these exact same two
+# constants too (see _draw_vent_object) -- both real vents must look
+# identical regardless of state or which one it is (per supervisor
+# feedback; an earlier, smaller vent2-specific size was tried out of
+# caution about the nearby thermometer and reverted once actually
+# measured against the real layout -- see git history).
 #
 # Blades are thin spoke *lines*, not filled wedges: this view's axes use
 # aspect="auto" (views.py's imshow_kwargs) so a data-space shape is
@@ -136,27 +142,32 @@ _FAN_N_BLADES = 4
 # activity), which *is* tied to a measured quantity.
 _FAN_SPIN_RADIANS_PER_FRAME = 0.5
 
-# The second vent's own object: a small louvered flap, not a powered
-# fan (voc has no HVAC state, just open/closed -- schematic._VOC_STATES),
-# so it has no blades to spin. Two discrete states rather than a
-# per-frame animation: closed = flat slats flush with the frame
-# (blocking), open = slats tilted with visible gaps between them.
-#
-# Deliberately smaller than the fan housing: this vent's real position
-# (x=0.86-0.94, near the room's far/right wall) sits right where the
-# thermometer docks (PublicScene.room_wall_anchor is the same wall, at
-# the domain's own right edge -- there is no "outside the wall" margin
-# at this resolution, so the thermometer is always pinned as far right
-# as its own width allows and the two are always close). Physical
-# position is never adjusted to dodge that (it would misrepresent the
-# real vent location); only the rendered size is reduced, twice now --
-# a first pass still touched the thermometer's gold ring with no gap in
-# an 800x600 screenshot.
-_VENT2_FRAME_HALF_WIDTH_M = 0.011
-_VENT2_SLAT_LENGTH_M = 0.018
-_VENT2_N_SLATS = 3
-_VENT2_CLOSED_ANGLE = 0.0                 # flush, horizontal
-_VENT2_OPEN_ANGLE = math.pi / 5           # tilted open
+# Vent 2 gets the exact same housing-plus-blades object, at the exact
+# same size, as Vent 1/the fan (per supervisor feedback: the two real
+# openings must look identical regardless of state, not a powered fan
+# for one and a static louvered flap -- or a same-shape-but-smaller
+# icon -- for the other; see git history for the removed vent2-only
+# slat rendering and the removed, overly-cautious smaller-size
+# constants). A smaller size was tried first, out of caution the room's
+# real geometry (vent2 sits at x=0.86-0.94, close to where the
+# thermometer docks on the same wall) wouldn't leave room at full size --
+# re-measured directly against the actual overlay layout rather than
+# left as an assumption, and it does: ~51px of real clearance to the
+# thermometer's left edge at 800x600 with both vents drawn at
+# _FAN_HOUSING_RADIUS_M/_FAN_BLADE_LENGTH_M.
+
+# The door's own object: a filled block at the real wall opening (see
+# schematic.room_overlay_geometry's "door" segment), width fixed, height
+# equal to the real door_top value (narrow=0.06m, wide=0.16m -- the
+# actual generator values, fds/generate_sim.py's door=[0.050, 0.150]),
+# so a NARROW<->WIDE switch reads as the block visibly growing/shrinking,
+# not a subtle line-length change (a bare thicker line was tried first
+# and, per direct feedback, still didn't read as "the door" clearly
+# enough). Width is a plain reference thickness for legibility, not a
+# claim about the door leaf's own real thickness (no such geometry is
+# in the data -- the model is a wall opening, not a hinged leaf).
+_DOOR_WIDTH_M = 0.03
+_DOOR_COLOR = "#38BDF8"
 
 
 def _flame_vertices(cx: float, base_z: float, height: float, width_ratio: float = 0.42,
@@ -190,15 +201,18 @@ def _fan_blade_endpoints(cx: float, cz: float, angle: float, length: float) -> t
     return ([cx, cx + dx * length], [cz, cz + dz * length])
 
 
-def _vent2_slat_endpoints(cx: float, cz: float, row: int, angle: float, length: float) -> tuple:
-    """(xs, ys) for one horizontal louvre slat of the second vent,
-    `row` steps above/below the frame centre (cz), tilted by `angle`
-    radians off horizontal -- 0 (closed) is flush, _VENT2_OPEN_ANGLE
-    (open) shows a gap to the slat above/below it."""
-    rz = cz + row * (_VENT2_FRAME_HALF_WIDTH_M * 0.75)
-    half = length / 2
-    dx, dz = math.cos(angle), math.sin(angle)
-    return ([cx - dx * half, cx + dx * half], [rz - dz * half, rz + dz * half])
+@dataclass
+class _VentVisual:
+    """Everything one real vent's own housing-plus-blades object needs to
+    track -- one instance per vent (PublicScene._vent1, ._vent2), shared
+    by the generic _draw_vent_object/_update_vent_activity/_animate_vent
+    methods below instead of two near-duplicate copies of this state."""
+    housing_patch: object = None
+    blades: list = field(default_factory=list)
+    blade_angle: float = 0.0
+    signature: Optional[tuple] = None       # the (x, z) position last drawn at
+    activity_patch: object = None
+    activity_base_r: float = 0.0
 
 
 class PublicScene(QtWidgets.QWidget):
@@ -225,8 +239,8 @@ class PublicScene(QtWidgets.QWidget):
         # blit background on load, not redrawn every tick.
         self._candle_patches: list = []
         self._candle_signature: Optional[tuple] = None
-        # The flame layers/glow (a subset of _candle_patches) are the only
-        # part of the candle that flickers -- tracked separately so
+        # The flame layers (a subset of _candle_patches) are the only part
+        # of the candle that flickers -- tracked separately so
         # _jitter_flame() can update just those, and so they can be
         # unregistered from SliceView's animated set before removal (see
         # _draw_candles). Each entry carries what its own jitter formula
@@ -243,43 +257,42 @@ class PublicScene(QtWidgets.QWidget):
         # freezes along with everything else when playback is paused,
         # rather than visibly flickering over a frozen scene.
         self._flame_layers_anim: list = []   # (patch, cx, base_z, base_height, lean)
-        self._flame_glows: list = []         # (patch, base_radius)
         # A brief extra-amplitude boost applied on top of the normal
         # flicker -- decays over the next few real frames. Purely a "the
         # child touched this" acknowledgement (Phase 3 section 1); never
         # changes what the flame *represents*, only how it moves for a
         # moment.
         self._flame_pulse_frames_left = 0
-        # Phase 12 section 2: a small activity glow at the real vent
-        # position, visible only while the fan is ON -- driven every
-        # frame by the real per-frame velocity magnitude (never a
-        # direction; this dataset only supports magnitude), the same
-        # animated-extra piggyback _jitter_flame already uses so it costs
-        # nothing beyond the redraw show_frame() was already doing.
-        self._vent_activity_patch = None
-        self._vent_activity_base_r = 0.0
-        # The fan itself: a housing (static, baked into the background
-        # like the candle body/wick) plus blades (animated like the flame
-        # layers) -- present at the vent position in every scenario that
-        # has one, regardless of on/off, so it reads as a physical object
+        # Both real vents (vod/"vent1", voc/"vent2") get the same object:
+        # a housing (static, baked into the background like the candle
+        # body/wick) plus blades (animated like the flame layers) --
+        # present at the vent's position in every scenario that has one,
+        # regardless of open/closed, so each reads as a physical object
         # at rest rather than an effect that only exists while active
-        # (Design Review §6 Priority 1). _fan_signature is the vent
-        # position last drawn at, the same redundant-redraw guard
-        # _candle_signature gives _draw_candles.
-        self._fan_housing_patch = None
-        self._fan_blades: list = []
-        self._fan_blade_angle = 0.0
-        self._fan_signature: Optional[tuple] = None
-        # The second vent (voc, "vent2"): a frame + louvre slats, all
-        # static -- no activity glow and no per-frame spin, since voc has
-        # no HVAC state to drive one (schematic._VOC_STATES is just
-        # open/closed). Only redrawn when the position or open/closed
-        # state actually changes (_vent2_signature covers both, unlike
-        # _fan_signature which is position alone -- the fan's own state
-        # is shown by whether it spins, this vent's only by slat angle).
-        self._vent2_frame_patch = None
-        self._vent2_slats: list = []
-        self._vent2_signature: Optional[tuple] = None
+        # (Design Review §6 Priority 1, generalized to both vents per
+        # later supervisor feedback -- see _VentVisual's own docstring;
+        # both are always the same fixed size, see _FAN_HOUSING_RADIUS_M's
+        # own comment). Blades spin and an activity glow pulses while a
+        # vent is *open* (vent1: vod != 1/closed, i.e. plain-open or the real
+        # HVAC fan state; vent2: voc == 0/open) -- driven every frame by
+        # the real per-frame velocity magnitude for the pulse/spin rate
+        # (never a direction; this dataset only supports magnitude), the
+        # same animated-extra piggyback _jitter_flame already uses so it
+        # costs nothing beyond the redraw show_frame() was already doing.
+        # Quiet (no glow, still blades) while closed.
+        self._vent1 = _VentVisual()
+        self._vent2 = _VentVisual()
+        # The door's own object: a filled block at the real wall opening,
+        # sized to the real door_top height (schematic.room_overlay_
+        # geometry) -- static, like the candle body/vent housing, redrawn
+        # only when its signature (position, height) changes. A plain
+        # thicker line was tried first and wasn't visually distinct
+        # enough for a size change to actually read as "the door opened/
+        # shut" (real feedback after the first fix); a filled block whose
+        # height visibly grows/shrinks reads the same way the vents'
+        # housing+blades do -- an object, not a line.
+        self._door_patch = None
+        self._door_signature: Optional[tuple] = None
         # Hot/Cold's two simultaneous markers -- separate scatter artists
         # from SliceView.hover_highlight (which the researcher app's
         # Context Panel hover also uses), so this never touches shared
@@ -307,11 +320,67 @@ class PublicScene(QtWidgets.QWidget):
         # never hardcodes a value that could drift from views.py's own
         # _ROOM_VENT_LW tuning.
         self._vent_pulse_base_lw = None
+        # A fixed-pixel strip at the bottom of the widget the axes never
+        # draws into -- reserved for the mascots (see set_bottom_reserve_
+        # px), analogous to SCENE_WIDTH_FRAC's reserved right-hand column
+        # but expressed in pixels, not a fraction, since the mascots are
+        # fixed-size widgets that must not grow/shrink with the window.
+        # _bottom_frac is the *current* fraction that pixel value maps to
+        # (recomputed on every resize, since the same pixel count is a
+        # different fraction of a taller/shorter canvas) -- widget_
+        # fraction_for and probe_at both read it to stay consistent with
+        # wherever the axes actually is, the same reasoning SCENE_WIDTH_
+        # FRAC's own comment gives for those two and _strip_chrome.
+        self._bottom_reserve_px = 0
+        self._bottom_frac = 0.0
 
         self.view = SliceView(self)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.view.widget())
+
+    def set_bottom_reserve_px(self, px: int) -> None:
+        """Reserve `px` screen pixels at the bottom of this widget for the
+        mascots -- called once from PublicExperience with their real
+        combined footprint (see PublicOverlay.mascot_band_height_px), so
+        this scene never needs to know about mascot widgets directly.
+        Safe to call before the first load_case (the axes doesn't exist
+        yet; the value is just stored and picked up when _strip_chrome
+        creates it)."""
+        self._bottom_reserve_px = max(0, px)
+        if self.view.ax is not None:
+            self._reapply_axes_position()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        # The reserved pixel count is fixed, but the *fraction* of the
+        # canvas it represents isn't -- a resize (narrower window, split-
+        # screen, etc.) changes the canvas height under it, so the axes
+        # position has to be recomputed every time, not just once at
+        # load. A no-op until the axes exists.
+        if self.view.ax is not None:
+            self._reapply_axes_position()
+
+    def _reapply_axes_position(self) -> None:
+        """Recompute _bottom_frac from the *current* canvas height and
+        move the axes to leave that strip blank -- the one thing that
+        actually has to change on a resize (VIEW_X_RANGE's xlim and
+        SCENE_WIDTH_FRAC's own share of the width don't depend on canvas
+        height at all). imshow's aspect="auto" (views.py's own
+        imshow_kwargs) means shrinking the axes box vertically simply
+        compresses the whole rendered room+plume to fit above the
+        reserved strip -- no letterboxing, no cropping -- which is the
+        "the box's rendering area shrinks to fit above the margin"
+        behaviour this exists for."""
+        canvas = self.view.canvas
+        height = max(1, canvas.height())
+        # Capped well short of 1.0: a pathologically short window
+        # (reserve_px alone taller than the canvas) would otherwise
+        # collapse the axes to zero or negative height and blow up
+        # every fraction below that divides by (1 - bottom_frac).
+        self._bottom_frac = min(0.85, self._bottom_reserve_px / height)
+        self.view.ax.set_position([0, self._bottom_frac, SCENE_WIDTH_FRAC, 1 - self._bottom_frac])
+        self.view.canvas.capture_background()
 
     # -- setup ----------------------------------------------------------
     def load_case(self, case_index: int, quantity_key: SliceKey = None) -> int:
@@ -346,11 +415,28 @@ class PublicScene(QtWidgets.QWidget):
             # Size still tracks the real measured speed, so the fan
             # contrast is unchanged.
             self.view.set_flow_mode("activity")
+        # Cinematic mode itself is enabled once and never turned off (see
+        # set_cinematic_mode's own docstring), so its ember and smoke
+        # simulators keep running continuously across scenario switches
+        # unless told otherwise -- reset here on every real switch so
+        # embers/smoke spawned against the *previous* scenario's hot
+        # spots (e.g. a since-removed candle, after a candle-count
+        # change) don't keep drifting/decaying on screen after the
+        # temperature field underneath them has already changed.
+        self.view.reset_cinema_simulators()
         self.view.set_room_outline(self._room_outline_for(case_index))
         self._draw_candles(case_index)
-        self._draw_fan(case_index)
-        self._update_vent_activity(case_index)
-        self._draw_vent2(case_index)
+        entry = self._entry(case_index)
+        # vent1/vod: "open" covers both the plain-open state (0) and the
+        # real HVAC fan state (2) -- only "closed" (1) is not open. vent2/
+        # voc has no fan state, just open (0) / closed (1).
+        vent1_open = entry is not None and entry.vod != 1
+        vent2_open = entry is not None and entry.voc == 0
+        self._draw_vent_object(self._vent1, self.vent_marker_position(case_index))
+        self._update_vent_activity(self._vent1, self.vent_marker_position(case_index), vent1_open)
+        self._draw_vent_object(self._vent2, self.vent2_marker_position(case_index))
+        self._update_vent_activity(self._vent2, self.vent2_marker_position(case_index), vent2_open)
+        self._draw_door_object(case_index)
         self.clear_probe()
         return int(self._temperature.shape[0])
 
@@ -363,6 +449,20 @@ class PublicScene(QtWidgets.QWidget):
         field. Count comes from the manifest's own `candles` factor
         (0 -> 1 burner, 1 -> 2 -- schematic.py's own convention), never
         assumed.
+
+        The single-candle case reuses the two-candle branch's own
+        `cx_mid + span * 0.35` slot, not the bare midpoint: a real,
+        measured recon (probing the actual temperature field, not
+        assumed geometry) found the lit burner sits at x=0.94 in both
+        the 1- and 2-candle scenarios -- the same physical slot the
+        2-candle branch already places its second flame at, 2mm off.
+        The plain midpoint (x=0.90) is empty space *between* the two
+        candle slots, not a burner location at all; a tap there read
+        ~21C (room temperature) while the real flame it was meant to
+        represent burns at ~360C a few cm away -- the exact class of
+        bug this file's own "never fabricate data" principle exists to
+        catch, just missed here because nothing had checked the sprite
+        against the real field until that recon.
         """
         entry = self._entry(case_index)
         # Only meaningful on the y-normal side view this study's geometry
@@ -373,7 +473,7 @@ class PublicScene(QtWidgets.QWidget):
             n_candles = 2 if entry.candles == 1 else 1
             cx_mid = sum(_CANDLE_X) / 2
             span = _CANDLE_X[1] - _CANDLE_X[0]
-            xs = ([cx_mid] if n_candles == 1
+            xs = ([cx_mid + span * 0.35] if n_candles == 1
                   else [cx_mid - span * 0.35, cx_mid + span * 0.35])
             signature = tuple(xs)
 
@@ -390,10 +490,7 @@ class PublicScene(QtWidgets.QWidget):
 
         for patch, *_ in self._flame_layers_anim:
             self.view.remove_animated_extra(patch)
-        for patch, *_ in self._flame_glows:
-            self.view.remove_animated_extra(patch)
         self._flame_layers_anim = []
-        self._flame_glows = []
         for patch in self._candle_patches:
             patch.remove()
         self._candle_patches = []
@@ -421,6 +518,14 @@ class PublicScene(QtWidgets.QWidget):
         # don't need this: those live in the animated set and blit every
         # tick, these are baked into the background once per scenario.
         self.view.canvas.capture_background()
+        # Enforced, not just tested: the number of rendered flames must
+        # equal the real candle count on every single call, including a
+        # switch (this exact invariant has silently broken twice before
+        # -- a stale visual trace, then a fade-delay -- so it's checked
+        # here at the one place both counts are known, rather than only
+        # in tests that could themselves miss a third regression).
+        assert len(self._flame_layers_anim) == 3 * len(xs), (
+            f"flame count {len(self._flame_layers_anim)} != 3 * candle count {len(xs)}")
 
     def _flame_lean_for(self, cx: float, base_z: float) -> float:
         """How far sideways (metres) the real hot plume actually drifts
@@ -455,37 +560,20 @@ class PublicScene(QtWidgets.QWidget):
         return max(-search_m, min(peak_x - cx, search_m))
 
     def _draw_flame(self, cx: float, base_z: float) -> list:
-        """A small layered flame (glow + three warm-to-hot polygons)
-        rooted at the wick tip -- schematic.py's SchematicWidget draws
-        the same three-layer idea with QPainter; this is the matplotlib
-        equivalent, in physical (x, z) data units, drawn on top of the
-        cinema pipeline's own flame rendering (zorder 9) so the two
-        visually fuse into one fire rather than sitting side by side.
+        """A small layered flame (three warm-to-hot polygons, no glow/
+        halo behind them -- see git history for the removed one) rooted
+        at the wick tip -- schematic.py's SchematicWidget draws the same
+        layered idea with QPainter; this is the matplotlib equivalent,
+        in physical (x, z) data units, drawn on top of the cinema
+        pipeline's own flame rendering (zorder 9) so the two visually
+        fuse into one fire rather than sitting side by side.
 
-        A first attempt only widened the soft background glow to cover
-        a fan-driven lean. That was not enough: the glow is a faint,
-        translucent halo (alpha 0.22) sitting *behind* the bright,
-        opaque teardrop layers a viewer's eye actually reads as "the
-        flame" -- and those stayed perfectly vertical regardless, so
-        the small icon still looked like a straight candle sitting next
-        to a separate, leaning fire. _flame_lean_for measures the real
-        drift once per scenario; both the bright layers (via
-        _flame_vertices' own lean parameter, base rooted at the real
-        wick, only the body bends) and the glow's centre now follow it.
+        _flame_lean_for measures the real drift once per scenario; the
+        bright layers (via _flame_vertices' own lean parameter, base
+        rooted at the real wick, only the body bends) follow it.
         """
         patches = []
         lean = self._flame_lean_for(cx, base_z)
-        glow_r = _FLAME_HEIGHT_M * 1.5
-        # 0.22 -> 0.42: still translucent (it has to blend into whatever
-        # real colour is above it, not paint over it), but no longer so
-        # faint it read as barely there next to the real bloom's own
-        # saturation.
-        glow = Circle((cx + lean * 0.5, base_z + _FLAME_HEIGHT_M * 0.5), glow_r,
-                      facecolor="#FF7A18", edgecolor="none", alpha=0.42, zorder=8)
-        self.view.ax.add_patch(glow)
-        patches.append(glow)
-        self.view.add_animated_extra(glow)
-        self._flame_glows.append((glow, glow_r))
         for height_frac, color, lift_frac in _FLAME_LAYERS:
             height = _FLAME_HEIGHT_M * height_frac
             lift = _FLAME_HEIGHT_M * lift_frac
@@ -513,7 +601,7 @@ class PublicScene(QtWidgets.QWidget):
         weren't redrawn too) -- piggybacking on the tick that redraws
         everything anyway is free by comparison.
         """
-        if not self._flame_layers_anim and not self._flame_glows:
+        if not self._flame_layers_anim:
             return
         boost = 0.0
         if self._flame_pulse_frames_left > 0:
@@ -523,40 +611,43 @@ class PublicScene(QtWidgets.QWidget):
                   + 0.04 * math.sin(index * 1.9 + 1.3))
         for patch, cx, base_z, base_height, lean in self._flame_layers_anim:
             patch.set_xy(_flame_vertices(cx, base_z, base_height * wobble, lean=lean))
-        glow_wobble = 1.0 + boost + 0.05 * math.sin(index * 1.1 + 2.0)
-        for patch, base_r in self._flame_glows:
-            patch.set_radius(base_r * glow_wobble)
 
     # How many real frames a tap's flame pulse lasts -- a handful of
     # frames at the ~24 fps cinema rate is well under a second, a
     # deliberate "I felt that" flash rather than a lingering effect.
     _FLAME_PULSE_FRAMES = 8
 
-    def _draw_fan(self, case_index: int) -> None:
-        """A small housing + blades at the real vent position, drawn
+    def _draw_vent_object(self, vent: "_VentVisual", position) -> None:
+        """A small housing + blades at a real vent's position, drawn
         whenever a scenario has one to draw at all -- unlike the activity
-        glow below, this does not depend on on/off state (Design Review
-        §6 Priority 1): a fan that only exists in the ON scenes reads as
-        an effect, not an object. The housing is static (baked into the
-        background like the candle body/wick); the blades sit in
-        SliceView's animated set so _jitter_vent_activity can turn them.
+        glow below, this does not depend on open/closed state (Design
+        Review §6 Priority 1): a vent that only exists in one state reads
+        as an effect, not an object. The housing is static (baked into
+        the background like the candle body/wick); the blades sit in
+        SliceView's animated set so _animate_vent can turn them. Shared
+        by both real vents (see _VentVisual's own docstring); `vent` is
+        which one's own state this call updates. Always drawn at the
+        same fixed size (_FAN_HOUSING_RADIUS_M/_FAN_BLADE_LENGTH_M) for
+        both -- per supervisor feedback, the two real openings must look
+        identical regardless of state or which vent it is (see those
+        constants' own comment for why an earlier, smaller vent2 size
+        was tried and reverted).
 
         Same redundant-redraw guard _draw_candles uses (a signature
         check before touching any existing patch): the vent position is
         the same across every scenario on this plane, so in practice this
         only ever does real work once, on the first load.
         """
-        position = self.vent_marker_position(case_index)
-        if position == self._fan_signature:
+        if position == vent.signature:
             return
-        self._fan_signature = position
-        if self._fan_housing_patch is not None:
-            self._fan_housing_patch.remove()
-            self._fan_housing_patch = None
-        for blade in self._fan_blades:
+        vent.signature = position
+        if vent.housing_patch is not None:
+            vent.housing_patch.remove()
+            vent.housing_patch = None
+        for blade in vent.blades:
             self.view.remove_animated_extra(blade)
             blade.remove()
-        self._fan_blades = []
+        vent.blades = []
         if position is None:
             self.view.canvas.capture_background()
             return
@@ -569,8 +660,8 @@ class PublicScene(QtWidgets.QWidget):
                          facecolor="#232B38", edgecolor="#8B96A8",
                          linewidth=1.4, alpha=0.85, zorder=7)
         self.view.ax.add_patch(housing)
-        self._fan_housing_patch = housing
-        self._fan_blade_angle = 0.0
+        vent.housing_patch = housing
+        vent.blade_angle = 0.0
         for k in range(_FAN_N_BLADES):
             angle = k * (2 * math.pi / _FAN_N_BLADES)
             xs, ys = _fan_blade_endpoints(vx, vz, angle, _FAN_BLADE_LENGTH_M)
@@ -578,118 +669,94 @@ class PublicScene(QtWidgets.QWidget):
                            solid_capstyle="round", zorder=9)
             self.view.ax.add_line(blade)
             self.view.add_animated_extra(blade)
-            self._fan_blades.append(blade)
+            vent.blades.append(blade)
         self.view.canvas.capture_background()
 
-    def _draw_vent2(self, case_index: int) -> None:
-        """The second vent's own object: a frame + louvre slats at the
-        real voc opening, drawn whenever a scenario has one -- same
-        "always present" reasoning _draw_fan gives for the fan (Design
-        Review §6 Priority 1 generalizes to any tappable device here, not
-        just the powered one). All static: voc has only open/closed
-        states (schematic._VOC_STATES), no HVAC speed to animate, so
-        unlike the fan's blades these never need a per-frame update --
-        only a redraw when the position or open/closed state changes.
-
-        Same redundant-redraw guard _draw_fan/_draw_candles use, keyed on
-        (position, is_open) rather than position alone, since this is
-        what has to change to justify touching the patches.
+    def _draw_door_object(self, case_index: int) -> None:
+        """A filled block at the door's real wall opening, height equal
+        to the real door_top value -- see door_geometry and _DOOR_WIDTH_M's
+        own comment for why this exists instead of the plainer thicker-
+        line version (git history) it replaced: a size change needs to
+        read as an object visibly growing/shrinking, not a subtle change
+        in a line's length. Static, like the candle body/vent housing --
+        redrawn only when its (x, height) signature actually changes.
         """
-        entry = self._entry(case_index)
-        position = self.vent2_marker_position(case_index)
-        is_open = entry is not None and entry.voc == 0
-        signature = (position, is_open)
-        if signature == self._vent2_signature:
+        geometry = self.door_geometry(case_index)
+        if geometry == self._door_signature:
             return
-        self._vent2_signature = signature
-        if self._vent2_frame_patch is not None:
-            self._vent2_frame_patch.remove()
-            self._vent2_frame_patch = None
-        for slat in self._vent2_slats:
-            slat.remove()
-        self._vent2_slats = []
-        if position is None:
+        self._door_signature = geometry
+        if self._door_patch is not None:
+            self._door_patch.remove()
+            self._door_patch = None
+        if geometry is None:
             self.view.canvas.capture_background()
             return
-        vx, vz = position
-        frame = Rectangle(
-            (vx - _VENT2_FRAME_HALF_WIDTH_M, vz - _VENT2_FRAME_HALF_WIDTH_M),
-            _VENT2_FRAME_HALF_WIDTH_M * 2, _VENT2_FRAME_HALF_WIDTH_M * 2,
-            facecolor="#232B38", edgecolor="#8B96A8", linewidth=1.4, zorder=7)
-        self.view.ax.add_patch(frame)
-        self._vent2_frame_patch = frame
-        angle = _VENT2_OPEN_ANGLE if is_open else _VENT2_CLOSED_ANGLE
-        color = "#7DD3FC" if is_open else "#C3CCD9"
-        for row in range(-1, _VENT2_N_SLATS - 1):
-            xs, ys = _vent2_slat_endpoints(vx, vz, row, angle, _VENT2_SLAT_LENGTH_M)
-            slat = Line2D(xs, ys, color=color, linewidth=2.2,
-                         solid_capstyle="round", zorder=9)
-            self.view.ax.add_line(slat)
-            self._vent2_slats.append(slat)
-        # Static like the fan housing/candle body -- baked into the
-        # background once per state change, not part of the per-frame
-        # animated set.
+        dx, height = geometry
+        patch = Rectangle(
+            (dx - _DOOR_WIDTH_M / 2, ROOM_Z[0]), _DOOR_WIDTH_M, height,
+            facecolor=_DOOR_COLOR, edgecolor="#0C4A6E", linewidth=1.2,
+            alpha=0.92, zorder=7)
+        self.view.ax.add_patch(patch)
+        self._door_patch = patch
         self.view.canvas.capture_background()
 
-    def _update_vent_activity(self, case_index: int) -> None:
-        """A small activity glow at the vent's real position -- present
-        only while the fan is actually ON (entry.vod == 2), matching
-        "quiet when OFF" (Phase 12 section 2). Recreated only when the
-        on/off state changes, the same signature-check idea _draw_
-        candles already uses to skip redundant redraws."""
-        entry = self._entry(case_index)
-        position = self.vent_marker_position(case_index)
-        on = entry is not None and entry.vod == 2
-        if not on or position is None:
-            if self._vent_activity_patch is not None:
-                self.view.remove_animated_extra(self._vent_activity_patch)
-                self._vent_activity_patch.remove()
-                self._vent_activity_patch = None
+    def _update_vent_activity(self, vent: "_VentVisual", position, is_open: bool) -> None:
+        """A small activity glow at a vent's real position -- present
+        only while that vent is actually open, matching "quiet when
+        closed" (Phase 12 section 2, generalized to both real vents).
+        Recreated only when the open/closed state changes, the same
+        signature-check idea _draw_candles already uses to skip
+        redundant redraws."""
+        if not is_open or position is None:
+            if vent.activity_patch is not None:
+                self.view.remove_animated_extra(vent.activity_patch)
+                vent.activity_patch.remove()
+                vent.activity_patch = None
             return
         vx, vz = position
-        if self._vent_activity_patch is not None:
-            self._vent_activity_patch.center = (vx, vz)
+        if vent.activity_patch is not None:
+            vent.activity_patch.center = (vx, vz)
             return
-        self._vent_activity_base_r = 0.035
-        patch = Circle((vx, vz), self._vent_activity_base_r,
+        vent.activity_base_r = 0.035
+        patch = Circle((vx, vz), vent.activity_base_r,
                       facecolor="#7DD3FC", edgecolor="none", alpha=0.2, zorder=8)
         self.view.ax.add_patch(patch)
         self.view.add_animated_extra(patch)
-        self._vent_activity_patch = patch
+        vent.activity_patch = patch
 
-    def _jitter_vent_activity(self, index: int, vel) -> None:
-        """The vent's own "this thing is doing something" -- driven by
+    def _animate_vent(self, vent: "_VentVisual", index: int, vel) -> None:
+        """One vent's own "this thing is doing something" -- driven by
         the real per-frame mean velocity magnitude (never a direction;
         _VELOCITY_ACTIVITY_SCALE is just a display normalization against
         the real ~0.5 m/s this dataset's own fan-on scenarios measure,
         not an invented threshold). Piggybacks on the same show_frame()
         tick _jitter_flame already rides for free -- no independent
-        timer, and the patch simply doesn't exist while the fan is OFF,
-        so there is nothing to update (and nothing drawn) then."""
-        self._spin_fan_blades()
-        if self._vent_activity_patch is None:
+        timer, and the patch simply doesn't exist while the vent is
+        closed, so there is nothing to update (and nothing drawn) then."""
+        self._spin_vent_blades(vent)
+        if vent.activity_patch is None:
             return
         speed = float(vel.mean()) if vel is not None else 0.0
         intensity = max(0.0, min(1.0, speed / self._VELOCITY_ACTIVITY_SCALE))
         pulse = 0.5 + 0.5 * math.sin(index * 0.6)
-        self._vent_activity_patch.set_radius(
-            self._vent_activity_base_r * (1.0 + 0.6 * intensity * pulse))
-        self._vent_activity_patch.set_alpha(0.12 + 0.28 * intensity)
+        vent.activity_patch.set_radius(
+            vent.activity_base_r * (1.0 + 0.6 * intensity * pulse))
+        vent.activity_patch.set_alpha(0.12 + 0.28 * intensity)
 
     _VELOCITY_ACTIVITY_SCALE = 0.5
 
-    def _spin_fan_blades(self) -> None:
-        """Turn the blades while the fan is ON, hold them still while
-        OFF -- the same "does the activity patch exist" proxy for on/off
-        _jitter_vent_activity's own docstring already relies on, so this
-        never needs its own copy of the entry.vod check."""
-        if not self._fan_blades or self._fan_signature is None:
+    def _spin_vent_blades(self, vent: "_VentVisual") -> None:
+        """Turn a vent's blades while it's open, hold them still while
+        closed -- the same "does the activity patch exist" proxy for
+        open/closed _animate_vent's own docstring already relies on, so
+        this never needs its own copy of the entry.vod/voc check."""
+        if not vent.blades or vent.signature is None:
             return
-        if self._vent_activity_patch is not None:
-            self._fan_blade_angle += _FAN_SPIN_RADIANS_PER_FRAME
-        vx, vz = self._fan_signature
-        for k, blade in enumerate(self._fan_blades):
-            angle = self._fan_blade_angle + k * (2 * math.pi / _FAN_N_BLADES)
+        if vent.activity_patch is not None:
+            vent.blade_angle += _FAN_SPIN_RADIANS_PER_FRAME
+        vx, vz = vent.signature
+        for k, blade in enumerate(vent.blades):
+            angle = vent.blade_angle + k * (2 * math.pi / _FAN_N_BLADES)
             xs, ys = _fan_blade_endpoints(vx, vz, angle, _FAN_BLADE_LENGTH_M)
             blade.set_data(xs, ys)
 
@@ -715,11 +782,11 @@ class PublicScene(QtWidgets.QWidget):
         return any(abs(x - cx) <= _CANDLE_TAP_RADIUS_M for cx in self._candle_signature)
 
     def vent_marker_position(self, case_index: int) -> Optional[tuple]:
-        """Physical (x, z) at the fan/HVAC vent's real ceiling opening --
+        """Physical (x, z) at the primary vent's real ceiling opening --
         the "vod" vent from schematic.room_overlay_geometry, the same
-        factor the Fan explore control drives (see experiments.py). None
-        off the y-normal plane or with no manifest entry, the same gate
-        _room_outline_for and _draw_candles use."""
+        factor the "vent1" explore control drives (see experiments.py).
+        None off the y-normal plane or with no manifest entry, the same
+        gate _room_outline_for and _draw_candles use."""
         entry = self._entry(case_index)
         if entry is None or self._quantity_key.direction != 1:
             return None
@@ -740,18 +807,20 @@ class PublicScene(QtWidgets.QWidget):
         (x0, z0, x1, _z1), _state = geometry["vents"][1]
         return ((x0 + x1) / 2, z0)
 
-    def room_wall_anchor(self, case_index: int) -> Optional[tuple]:
-        """Physical (x, z) just outside the room's own real right-hand
-        wall (ROOM_X[1]) at mid-height -- lets a Qt overlay widget (the
-        thermometer) dock beside the actual room geometry instead of a
-        fixed pixel offset from the window edge, the same idea
-        vent_marker_position already uses for the fan label. None off
-        the y-normal plane or with no manifest entry, same gate that
-        one uses."""
+    def door_geometry(self, case_index: int) -> Optional[tuple]:
+        """(x, height) for the door's own object: `x` is the real wall
+        opening's position (schematic.room_overlay_geometry's "door"
+        segment), `height` is its real door_top value (narrow=0.06m,
+        wide=0.16m) -- the actual quantity that changes between the two
+        real door states. None off the y-normal plane or with no
+        manifest entry, the same gate every other *_marker_position/
+        *_geometry lookup here uses."""
         entry = self._entry(case_index)
         if entry is None or self._quantity_key.direction != 1:
             return None
-        return (ROOM_X[1], (ROOM_Z[0] + ROOM_Z[1]) / 2)
+        geometry = room_overlay_geometry(entry.door, entry.vod, entry.voc)
+        dx0, dz0, dx1, dz1 = geometry["door"]
+        return (dx0, dz1 - dz0)
 
     # Tap tolerance for the vent -- same physical scale as the candle's
     # own tap radius, making the vent a real tappable object in the scene
@@ -868,9 +937,12 @@ class PublicScene(QtWidgets.QWidget):
         widget fraction SCENE_WIDTH_FRAC, not 1.0, or every real-
         geometry marker (the vent labels, this widget's own thermometer
         anchor) would sit past the axes' actual right edge, out in the
-        reserved thermometer column. Z is unaffected -- the view is not
-        cropped vertically, see VIEW_X_RANGE's own comment -- so it
-        still reads off the full data extent."""
+        reserved thermometer column. Z is not *cropped* -- the full data
+        extent is still visible, see VIEW_X_RANGE's own comment -- but it
+        is rescaled by (1 - _bottom_frac) the same way x is rescaled by
+        SCENE_WIDTH_FRAC, now that set_bottom_reserve_px can shrink the
+        axes' own vertical share of the widget to leave room for the
+        mascots below it."""
         if self.view._extent is None:
             return None
         _x0, _x1, z0, z1 = self.view._extent
@@ -878,7 +950,7 @@ class PublicScene(QtWidgets.QWidget):
         if view_x1 == view_x0 or z1 == z0:
             return None
         return (SCENE_WIDTH_FRAC * (x - view_x0) / (view_x1 - view_x0),
-                1.0 - (z - z0) / (z1 - z0))
+                (1.0 - self._bottom_frac) * (1.0 - (z - z0) / (z1 - z0)))
 
     def _strip_chrome(self) -> None:
         """Hide every scientific affordance: colorbar, axis frame, title.
@@ -889,11 +961,12 @@ class PublicScene(QtWidgets.QWidget):
         self.view.ax.set_yticks([])
         for spine in self.view.ax.spines.values():
             spine.set_visible(False)
-        # Full bleed vertically, SCENE_WIDTH_FRAC horizontally -- the fire
-        # should reach the top/bottom/left edges of the screen, not sit in
-        # a plot box with margins, but the right SCENE_WIDTH_FRAC..1 strip
-        # is deliberately real reserved space for the thermometer (see
-        # SCENE_WIDTH_FRAC's own comment), never drawn into.
+        # Full bleed left/top, SCENE_WIDTH_FRAC horizontally, and (if
+        # set_bottom_reserve_px was called) a real reserved strip at the
+        # bottom too -- the fire should reach the top/left edges of the
+        # screen, not sit in a plot box with margins, but the right
+        # SCENE_WIDTH_FRAC..1 strip (thermometer) and the bottom-most
+        # reserved pixels (mascots) are deliberately never drawn into.
         # subplots_adjust() alone can't get either the old full bleed or
         # this: init_plot()'s fig.colorbar(fraction=0.04, pad=0.02) already
         # shrank this axes' position directly (colorbar's own make_axes
@@ -901,8 +974,8 @@ class PublicScene(QtWidgets.QWidget):
         # recomputes from), and hiding the colorbar above never gives that
         # width back -- it leaves a permanent blank strip on the right.
         # Only an explicit set_position() overrides an explicitly-set
-        # position.
-        self.view.ax.set_position([0, 0, SCENE_WIDTH_FRAC, 1])
+        # position -- see _reapply_axes_position for the actual math.
+        self._reapply_axes_position()
         # Crop the visible x-range to the room (VIEW_X_RANGE), not the
         # full simulated domain -- see VIEW_X_RANGE's own comment. This
         # is a pure view/zoom (set_xlim), not a change to the plotted
@@ -962,7 +1035,8 @@ class PublicScene(QtWidgets.QWidget):
         if self._velocity is not None and i < self._velocity.shape[0]:
             vel = self._velocity[i]
         self._jitter_flame(i)
-        self._jitter_vent_activity(i, vel)
+        self._animate_vent(self._vent1, i, vel)
+        self._animate_vent(self._vent2, i, vel)
         self.view.show_frame(self._temperature[i], velocity_frame=vel,
                              next_frame=nxt, bloom_intensity=self._hrr_intensity(i))
 
@@ -1034,15 +1108,17 @@ class PublicScene(QtWidgets.QWidget):
         matplotlib's own transform/event pipeline (which needs a real
         QMouseEvent delivered to the canvas, and the overlay sits above
         it and would have to give that up first). Instead it uses the
-        geometric facts PublicScene itself guarantees: `_strip_chrome`
-        always sets the axes to (0,0)-(SCENE_WIDTH_FRAC,1) of the figure
-        and crops its visible x-range to VIEW_X_RANGE, so a widget-
-        fraction position maps to a known physical point directly once
-        rescaled by SCENE_WIDTH_FRAC and VIEW_X_RANGE -- no
-        devicePixelRatio or transform-API version assumptions involved.
-        A tap past SCENE_WIDTH_FRAC lands in the reserved thermometer
-        column, not on the scene, and returns None the same way a tap
-        outside the widget's own bounds already did.
+        geometric facts PublicScene itself guarantees: `_reapply_axes_
+        position` always sets the axes to (0, _bottom_frac)-(SCENE_WIDTH_
+        FRAC, 1) of the figure and crops its visible x-range to
+        VIEW_X_RANGE, so a widget-fraction position maps to a known
+        physical point directly once rescaled by SCENE_WIDTH_FRAC,
+        _bottom_frac, and VIEW_X_RANGE -- no devicePixelRatio or
+        transform-API version assumptions involved. A tap past
+        SCENE_WIDTH_FRAC lands in the reserved thermometer column, and a
+        tap below (1 - _bottom_frac) lands in the reserved mascot strip
+        -- neither is on the scene, and both return None the same way a
+        tap outside the widget's own bounds already did.
         """
         if self._temperature is None or self.view._extent is None:
             return None
@@ -1050,8 +1126,14 @@ class PublicScene(QtWidgets.QWidget):
         width, height = canvas.width(), canvas.height()
         if width <= 0 or height <= 0:
             return None
+        axes_height_frac = 1.0 - self._bottom_frac
+        if axes_height_frac <= 0:
+            return None
         frac_x = (widget_pos.x() / width) / SCENE_WIDTH_FRAC
-        frac_y = 1.0 - (widget_pos.y() / height)   # Qt top-left -> plot bottom-left
+        # Qt top-left -> plot bottom-left, rescaled against the axes' own
+        # (possibly-shrunk) share of the widget height rather than the
+        # full height -- see axes_height_frac above.
+        frac_y = 1.0 - (widget_pos.y() / height) / axes_height_frac
         if not (0.0 <= frac_x <= 1.0 and 0.0 <= frac_y <= 1.0):
             return None
         _x0, _x1, z0, z1 = self.view._extent

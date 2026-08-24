@@ -22,7 +22,17 @@ GLOW_TINT = np.array([1.0, 0.55, 0.15], dtype=np.float32)  # warm orange emissiv
 def apply_bloom(rgba: np.ndarray, intensity: np.ndarray, strength: float = 1.0) -> np.ndarray:
     """rgba: (H, W, 4) uint8 from the FireLUT. intensity: (H, W) float in
     [0, 1], the tonemapped value that was looked up in the LUT. Returns a
-    same-shape uint8 RGBA with the glow composited in."""
+    same-shape uint8 RGBA with the glow composited in.
+
+    Bloom's own warm-orange spill into nearby smoke is handled one layer
+    up, in cinema/pipeline.py's render() (see its own comment) -- a
+    dedicated temperature-based pass there, not a smoke_density argument
+    here, because the same "smoke reads as fire" complaint turned out to
+    have a second, non-bloom source too (a low auto-exposure ceiling
+    stretching even modest, non-flame temperatures into a near-opaque
+    *intrinsic* LUT color -- this function's own `alpha`, not bloom's
+    halo). One suppression pass on the fully-composed result covers both
+    causes instead of two overlapping, partial ones."""
     energy = np.clip((intensity - KNEE) / max(1.0 - KNEE, 1e-6), 0.0, 1.0).astype(np.float32)
     halo = np.zeros_like(energy)
     for sigma, weight in zip(SIGMAS, WEIGHTS):
