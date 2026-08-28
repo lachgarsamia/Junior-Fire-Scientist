@@ -22,7 +22,7 @@ from scenario_store import list_scenario_folders
 
 logger = logging.getLogger(__name__)
 
-_FOLDER_RE = re.compile(r'^c(\d+)_d(\d+)_vod(\d+)_voc(\d+)$')
+_FOLDER_RE = re.compile(r'^c(\d+)_d(\d+)_vod(\d+)_voc(\d+)(?:_.+)?$')
 
 # Order matters: matches the (candles, door, vod, voc) axis order used
 # throughout the app (config.py's N_CANDLES/N_DOORS/N_VOD/N_VOC, and the
@@ -67,6 +67,16 @@ def scan_scenarios(sim_root: str) -> list:
     by ranking each folder's raw factor value among the sorted set of
     distinct raw values seen for that factor, so a factor's index reflects
     its actual position among what's really on disk, not an assumed count.
+
+    A folder name may carry an arbitrary trailing suffix after its
+    c<n>_d<n>_vod<n>_voc<n> stem (e.g. FireScope's Pleiades staging
+    layout writes both an input-prep stub "c1_d0_vod0_voc0" and its real
+    output under "c1_d0_vod0_voc0_stage1_pleiades" -- see load_data.py's
+    SIM_ROOT). When two folder names share the same stem, only the
+    longer (more specific) name is kept as that scenario's entry; this
+    stays a pure name comparison, no disk access beyond the directory
+    listing list_scenario_folders() already did, matching this module's
+    existing "names only, not contents" scanning contract.
     """
     folders = list_scenario_folders(sim_root)
 
@@ -82,6 +92,16 @@ def scan_scenarios(sim_root: str) -> list:
     if skipped:
         logger.warning("manifest: skipping %d folder(s) with unrecognized names: %s",
                         len(skipped), skipped)
+
+    by_stem = {}
+    for folder, raw in raw_by_folder.items():
+        stem = tuple(raw[factor] for factor in _FACTORS)
+        current = by_stem.get(stem)
+        if current is None or len(os.path.basename(os.path.normpath(folder))) > \
+                len(os.path.basename(os.path.normpath(current))):
+            by_stem[stem] = folder
+    raw_by_folder = {folder: raw_by_folder[folder] for folder in by_stem.values()}
+    folders = [f for f in folders if f in raw_by_folder]
 
     raw_levels = {factor: sorted({raw[factor] for raw in raw_by_folder.values()})
                   for factor in _FACTORS}

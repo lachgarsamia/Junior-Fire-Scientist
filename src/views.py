@@ -12,7 +12,7 @@ from typing import Protocol
 import matplotlib as mpl
 import numpy as np
 from matplotlib.collections import LineCollection
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtWidgets, sip
 
 from widgets import MplCanvas
 from config import QUANTITY_DISPLAY, FRAMES_PER_SECOND
@@ -29,6 +29,20 @@ from cinema.velocity_arrows import sample_points, compute_deltas, compute_activi
 _INTERP_HZ = 30
 _INTERP_INTERVAL_MS = round(1000 / _INTERP_HZ)
 _NOMINAL_TICK_MS = 1000.0 / FRAMES_PER_SECOND
+
+# Scenario-switch cross-dissolve (Fire Explorer polish): a deliberately
+# *visible* transition, unlike the sub-frame interpolation above -- that
+# one exists to hide the gap between two adjacent real frames of the
+# SAME scenario (over one nominal tick, ~40ms at 24fps -- imperceptible
+# by design). A scenario switch (Vent/Candles/Vent2/Door) jumps between
+# two genuinely different runs, so "no perceptible hard-cut" means the
+# opposite: long enough to actually read as a dissolve, not another near-
+# instant blend that still looks like a cut. 240ms matches this file's
+# own convention for "a felt, deliberate visual event" (see PublicScene.
+# _VENT_PULSE_MS=260 elsewhere in this package) while staying short
+# enough not to feel laggy on top of the real scenario-switch cost
+# already measured (~85-115ms) for the tap itself.
+_SCENARIO_TRANSITION_MS = 240
 
 # Dark cinema backdrop (FireLab roadmap Phase 2): the FireLUT's alpha ramp
 # only reads as "fire floating in a dark room" against a near-black axes
@@ -135,6 +149,22 @@ class SliceView:
         self._interp_phase = 1.0
         self._interp_bloom_intensity = 1.0
         self._interp_velocity_frame = None
+        self._interp_smoke_density_frame = None
+        self._interp_smoke_density_to = None
+        # Scenario-switch cross-dissolve: deliberately separate state (and
+        # a separate timer) from the sub-frame interpolation above, not a
+        # reuse of it -- the two can be live at the same time (a real
+        # lookahead-driven interp tick already in flight the instant a
+        # scenario switch lands) and have different durations/triggers;
+        # sharing one set of fields would let either clobber the other's
+        # in-progress blend. See start_scenario_transition/_transition_tick.
+        self._transition_timer = QtCore.QTimer(self.canvas)
+        self._transition_timer.timeout.connect(self._transition_tick)
+        self._transition_from = None
+        self._transition_to = None
+        self._transition_phase = 1.0
+        self._transition_bloom_intensity = 1.0
+        self._transition_velocity_frame = None
         # Ember particles (FireLab roadmap Phase 2.1g): a second,
         # independently blit-tracked artist -- see widgets.py's
         # multi-artist blit_update() extension.
@@ -257,13 +287,16 @@ class SliceView:
         self.canvas.capture_background()
 
     def show_frame(self, frame: np.ndarray, velocity_frame: np.ndarray = None,
-                    next_frame: np.ndarray = None, bloom_intensity: float = 1.0) -> None:
+                    next_frame: np.ndarray = None, bloom_intensity: float = 1.0,
+                    smoke_density_frame: np.ndarray = None,
+                    smoke_density_next_frame: np.ndarray = None) -> None:
         """velocity_frame (GUI modernization pass, item 6): this cell's
         VELOCITY data at the same timestep -- meaningful when the velocity
         overlay is on (drives the contour overlay) and/or cinematic mode
-        is on (drives the smoke layer's Tier 2 advection, FireLab roadmap
-        Phase 2.1f; Tier 1's fixed drift is used when this is None). None
-        otherwise, the default for every pre-existing caller.
+        is on (drives the synthetic smoke layer's Tier 2 advection,
+        FireLab roadmap Phase 2.1f; Tier 1's fixed drift is used when
+        this is None). Ignored for smoke when smoke_density_frame is
+        given. None otherwise, the default for every pre-existing caller.
 
         next_frame/bloom_intensity (FireLab roadmap Phase 2.1c/d, cinematic
         mode only): next_frame is the frame at the following timestep --
@@ -274,14 +307,26 @@ class SliceView:
         interpolation is simply skipped that tick. bloom_intensity scales
         the pipeline's bloom/flicker strength (typically the scenario's
         current HRR normalized to its own peak); ignored outside cinematic
-        mode."""
+        mode.
+
+        smoke_density_frame/smoke_density_next_frame: pre-computed,
+        already-[0,1]-normalized real smoke density (see
+        cinema/real_smoke.py) for `frame`/`next_frame`'s own real
+        simulation times -- passed straight through to
+        EffectsPipeline.render(), and linearly blended the same way
+        `frame`/`next_frame` themselves are during the sub-frame
+        interpolation tick (see _interp_tick). None (the default) keeps
+        the synthetic SmokeSimulator fallback, unchanged for every
+        caller that doesn't pass real density."""
         self._last_frame = frame
         if self._cinematic_enabled:
             self._interp_bloom_intensity = bloom_intensity
             self._interp_velocity_frame = velocity_frame
+            self._interp_smoke_density_to = smoke_density_next_frame
             if next_frame is not None:
                 self._interp_from = frame
                 self._interp_to = next_frame
+                self._interp_smoke_density_frame = smoke_density_frame
                 self._interp_phase = 0.0
                 if not self._interp_timer.isActive():
                     self._interp_timer.start(_INTERP_INTERVAL_MS)
@@ -290,7 +335,8 @@ class SliceView:
                 self._interp_from = None
                 self._interp_to = None
             display_data = self._cinema_pipeline.render(
-                frame, hrr_intensity=bloom_intensity, velocity_frame=velocity_frame)
+                frame, hrr_intensity=bloom_intensity, velocity_frame=velocity_frame,
+                smoke_density_frame=smoke_density_frame)
             self._update_ember_scatter(frame, velocity_frame)
             self._update_velocity_arrows(frame, velocity_frame)
         else:
@@ -549,7 +595,27 @@ class SliceView:
         the next several frames instead of appearing at its real level
         immediately -- together reading as a leftover flame fading out
         rather than disappearing outright. No-op on whichever piece is
-        inactive (cinematic mode off, or no smoke buffer allocated yet)."""
+        inactive (cinematic mode off, or no smoke buffer allocated yet).
+
+        Also stops the sub-frame interpolation timer and drops its
+        _interp_from/_interp_to targets -- a real, reproduced gap this
+        used to miss: _interp_tick() runs independently of
+        TimeController (its own docstring says so) and keeps firing at
+        ~30 Hz purely because _interp_to is still set, blending toward
+        and rendering the *previous* scenario's own lookahead frame
+        (right down to stepping the smoke/ember sims with it) for up to
+        one blend cycle (~200-300 ms) after the switch -- regardless of
+        whether TimeController itself is playing or paused. That
+        lingering interpolated render of stale data is what actually
+        read as "the old flame fading out", not a failure to reset the
+        candle sprite or the simulators above (both were already
+        correct on their own -- measured: with only those reset, the
+        smoke buffer still jumped from a fresh 0 to 0.96 within two
+        ticks immediately after a switch, purely from this timer
+        replaying old interpolation targets). set_cinematic_mode(False,
+        ...) already does the same three-line reset when cinematic mode
+        turns off entirely; this is that same fix, reached on every
+        scenario switch instead of only there."""
         if self._ember_sim is not None:
             self._ember_sim.reset()
         self.ember_scatter.set_offsets(np.empty((0, 2)))
@@ -558,6 +624,11 @@ class SliceView:
         if self._cinema_pipeline is not None:
             self._cinema_pipeline.reset_smoke()
             self._cinema_pipeline.reset_exposure()
+        self._interp_timer.stop()
+        self._interp_from = None
+        self._interp_to = None
+        self._interp_smoke_density_frame = None
+        self._interp_smoke_density_to = None
 
     def _index_to_display_xy(self, rows, cols):
         """(row, col) array-index coordinates -> (x, y) display
@@ -673,20 +744,130 @@ class SliceView:
         mode is on and a lookahead frame is available): advances the blend
         phase toward _interp_to and blits the result, independent of
         TimeController's own (data-rate) tick. Never touches _last_frame
-        or overlays -- those stay tied to the last *real* frame only."""
+        or overlays -- those stay tied to the last *real* frame only.
+
+        sip.isdeleted() guard, same idea as PublicExperience._defer's own
+        parented-timer fix elsewhere in this codebase, applied where
+        parenting alone (self._interp_timer is already a child of
+        self.canvas) isn't enough: a real, reproduced crash (scratchpad/
+        repro_reentrancy.py) -- a tick already queued in the event loop
+        when self.canvas's C++ object gets torn down (dropping the last
+        Python reference without an explicit close()/deleteLater() first,
+        e.g. rapid window churn) still fires and touches self.canvas,
+        raising RuntimeError: wrapped C/C++ object of type MplCanvas has
+        been deleted -- escaping through a Qt-invoked slot, where PyQt/Qt
+        on this version can turn an uncaught Python exception into a
+        hard process abort rather than a catchable one. Checked first,
+        before anything else touches self.canvas -- but measured as not
+        sufficient alone: the same teardown can also land *during* the
+        blit_update() call below (matplotlib's own draw() path can pump
+        the event queue), so the whole body is still wrapped rather than
+        trusting one check to catch every point of failure."""
+        if sip.isdeleted(self.canvas):
+            return
         if not self._cinematic_enabled or self._interp_to is None:
             self._interp_timer.stop()
             return
-        self._interp_phase = min(1.0, self._interp_phase + _INTERP_INTERVAL_MS / _NOMINAL_TICK_MS)
-        blended = lerp_frames(self._interp_from, self._interp_to, self._interp_phase)
-        rgba = self._cinema_pipeline.render(
-            blended, hrr_intensity=self._interp_bloom_intensity, velocity_frame=self._interp_velocity_frame)
-        self._update_ember_scatter(blended, self._interp_velocity_frame)
-        self._update_velocity_arrows(blended, self._interp_velocity_frame)
-        self.heatmap.set_data(rgba)
-        self.canvas.blit_update(self._animated_artists())
-        if self._interp_phase >= 1.0:
-            self._interp_timer.stop()
+        try:
+            self._interp_phase = min(
+                1.0, self._interp_phase + _INTERP_INTERVAL_MS / _NOMINAL_TICK_MS)
+            blended = lerp_frames(self._interp_from, self._interp_to, self._interp_phase)
+            blended_density = None
+            if (self._interp_smoke_density_frame is not None
+                    and self._interp_smoke_density_to is not None):
+                # Same linear blend as the temperature frames themselves,
+                # not a fresh soot_at_time() lookup mid-tick: both
+                # densities are already real, time-aligned frames (see
+                # PublicScene.show_frame), and this window is short
+                # (~200-300ms) against how slowly real soot density
+                # actually changes (median ~0.2% per its own frame,
+                # measured in the alignment investigation) -- a linear
+                # blend of the two real endpoints is an accurate enough
+                # stand-in for the true intermediate real time without
+                # threading a live "current real time" value through
+                # this timer callback.
+                blended_density = lerp_frames(
+                    self._interp_smoke_density_frame, self._interp_smoke_density_to,
+                    self._interp_phase)
+            rgba = self._cinema_pipeline.render(
+                blended, hrr_intensity=self._interp_bloom_intensity,
+                velocity_frame=self._interp_velocity_frame,
+                smoke_density_frame=blended_density)
+            self._update_ember_scatter(blended, self._interp_velocity_frame)
+            self._update_velocity_arrows(blended, self._interp_velocity_frame)
+            self.heatmap.set_data(rgba)
+            self.canvas.blit_update(self._animated_artists())
+            if self._interp_phase >= 1.0:
+                self._interp_timer.stop()
+        except RuntimeError:
+            if not sip.isdeleted(self.canvas):
+                raise
+
+    def start_scenario_transition(self, new_frame: np.ndarray, velocity_frame: np.ndarray = None,
+                                   bloom_intensity: float = 1.0) -> bool:
+        """Cross-dissolve into `new_frame` from whatever this view last
+        actually displayed, for a scenario switch -- a genuinely different
+        run, not the next real frame of the one already showing (that
+        case is _interp_tick's, above). Blends the real raw frames
+        (temperature-field values, same physical units and, for every
+        scenario this study's manifest actually contains, the same array
+        shape -- confirmed by reading the data, not assumed) through the
+        same cinema pipeline every other frame goes through, so the
+        colors/bloom/smoke this produces are exactly what the real
+        blended field would look like, not a separately-tuned fade.
+
+        Returns False -- and does nothing -- when there is no real
+        "before" to blend from yet (self._last_frame is still None, i.e.
+        this is the very first frame this view has ever shown) or
+        cinematic mode is off (science mode has no cinema_pipeline to
+        render an in-between frame through). The caller must fall back to
+        a plain show_frame() in that case."""
+        if self._last_frame is None or not self._cinematic_enabled:
+            return False
+        # Stop, don't let it keep running: the two blends target the same
+        # heatmap/artists, and the same-scenario one is now blending
+        # toward a frame of a scenario that no longer exists.
+        self._interp_timer.stop()
+        self._interp_to = None
+        self._transition_from = self._last_frame
+        self._transition_to = new_frame
+        self._transition_phase = 0.0
+        self._transition_velocity_frame = velocity_frame
+        self._transition_bloom_intensity = bloom_intensity
+        self._last_frame = new_frame
+        if not self._transition_timer.isActive():
+            self._transition_timer.start(_INTERP_INTERVAL_MS)
+        return True
+
+    def _transition_tick(self) -> None:
+        """Scenario-transition timer callback -- same shape and the same
+        sip.isdeleted()-guarded try/except as _interp_tick, and the same
+        real reason (see that method's own comment): a tick already
+        queued when self.canvas's C++ object is torn down must not touch
+        it, checked both before and during, since matplotlib's own draw()
+        path can itself pump the event queue mid-call."""
+        if sip.isdeleted(self.canvas):
+            return
+        if self._transition_to is None:
+            self._transition_timer.stop()
+            return
+        try:
+            self._transition_phase = min(
+                1.0, self._transition_phase + _INTERP_INTERVAL_MS / _SCENARIO_TRANSITION_MS)
+            blended = lerp_frames(self._transition_from, self._transition_to, self._transition_phase)
+            rgba = self._cinema_pipeline.render(
+                blended, hrr_intensity=self._transition_bloom_intensity,
+                velocity_frame=self._transition_velocity_frame)
+            self._update_ember_scatter(blended, self._transition_velocity_frame)
+            self._update_velocity_arrows(blended, self._transition_velocity_frame)
+            self.heatmap.set_data(rgba)
+            self.canvas.blit_update(self._animated_artists())
+            if self._transition_phase >= 1.0:
+                self._transition_timer.stop()
+                self._transition_to = None
+        except RuntimeError:
+            if not sip.isdeleted(self.canvas):
+                raise
 
     # -------------------------------------------------- isotherms (M2.6.2)
     def set_isotherm_levels(self, levels: list) -> None:

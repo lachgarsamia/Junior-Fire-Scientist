@@ -152,8 +152,8 @@ class TestFeaturesRealData:
 
     def test_matches_direct_computation_on_known_scenario(self):
         key = DEFAULT_SLICE_KEY
-        data = load_data(os.path.join(SIM_ROOT, "c1_d0_vod0_voc0"), key)
-        entry = ScenarioEntry(0, "c1_d0_vod0_voc0", os.path.join(SIM_ROOT, "c1_d0_vod0_voc0"), 0, 0, 0, 0)
+        data = load_data(os.path.join(SIM_ROOT, "c1_d0_vod0_voc0_stage1_pleiades"), key)
+        entry = ScenarioEntry(0, "c1_d0_vod0_voc0", os.path.join(SIM_ROOT, "c1_d0_vod0_voc0_stage1_pleiades"), 0, 0, 0, 0)
         store = FakeStore({0: data})
         features = compute_scenario_features(entry, store, fps=4)
 

@@ -68,10 +68,25 @@ def _suppress_haze_over_smoke(fire_rgba: np.ndarray, frame: np.ndarray,
     by opacity alone. Raw degrees don't have that problem: 100C is 100C
     regardless of what the rest of the frame is doing, so it's what
     actually separates "haze the smoke should win" from "core the flame
-    should keep" in every scenario, not just the typical one."""
+    should keep" in every scenario, not just the typical one.
+
+    Falloff is steep (density saturates to full suppression by ~0.25),
+    not linear in density -- a real, measured regression: the wider
+    ceiling-trapped haze band the smoke-stratification fix produces
+    commonly sits at density 0.15-0.25 in this dataset's own hot-gas
+    layer, well short of the ~1.0 a plume's core reaches, and a plain
+    `1 - density` left 75-85% of that pixel's fire-orange alpha visible
+    there -- wide and bright enough to read as a second, unexplained
+    flame floating at ceiling height with no real hot cell under it.
+    Once real smoke is genuinely present over a non-flame pixel it
+    should read as smoke outright, not partially blend by however thick
+    that smoke happens to be; only near-zero wisps (< ~0.05) still let a
+    soft trace of warmth through, for a gradual edge rather than a hard
+    cutoff."""
     alpha = fire_rgba[..., 3].astype(np.float32) / 255.0
     haze = frame < HAZE_TEMP_CEILING_C
-    suppress = np.where(haze, 1.0 - np.clip(density, 0.0, 1.0), 1.0)
+    d = np.clip(density, 0.0, 1.0) / 0.25
+    suppress = np.where(haze, (1.0 - np.clip(d, 0.0, 1.0)) ** 2, 1.0)
     out = fire_rgba.copy()
     out[..., 3] = np.clip(alpha * suppress * 255.0, 0.0, 255.0).astype(np.uint8)
     return out
@@ -179,7 +194,8 @@ class EffectsPipeline:
         self.exposure.snap_next()
 
     def render(self, frame: np.ndarray, hrr_intensity: float = 1.0,
-               velocity_frame: np.ndarray = None) -> np.ndarray:
+               velocity_frame: np.ndarray = None,
+               smoke_density_frame: np.ndarray = None) -> np.ndarray:
         """hrr_intensity: a scenario's current HRR(t) normalized to its own
         peak (1.0 = at-or-near peak), or 1.0 (neutral) if no HRR data is
         available -- scales both the flicker amplitude and the bloom
@@ -187,9 +203,21 @@ class EffectsPipeline:
         curve instead of being a constant cosmetic overlay.
 
         velocity_frame: this cell's VELOCITY data at the same timestep, or
-        None -- drives the smoke layer's Tier 2 advection (see
+        None -- drives the synthetic smoke layer's Tier 2 advection (see
         cinema/smoke.py); Tier 1 (fixed upward drift) is used when it's
-        absent."""
+        absent. Ignored when smoke_density_frame is given (real data
+        needs no advection model at all).
+
+        smoke_density_frame: a pre-computed, already-[0,1]-normalized
+        density array (same shape as `frame`), typically real FDS SOOT
+        DENSITY, time-aligned and normalized by the caller (see
+        cinema/real_smoke.py) -- used directly as this frame's smoke
+        density with no further transport/decay applied here. When None
+        (the researcher app's generic "Cinematic fire view" toggle,
+        which has no per-scenario real-soot alignment plumbed to it),
+        falls back to the synthetic SmokeSimulator exactly as before --
+        that fallback is the only remaining consumer of the
+        buoyancy/decay/reservoir model in cinema/smoke.py."""
         t0 = time.perf_counter()
         vmax = self.exposure.update(frame)
         span = max(vmax - self.vmin, 1e-6)
@@ -200,11 +228,14 @@ class EffectsPipeline:
         self._flicker_i += 1
         t = np.clip(t * (1.0 + FLICKER_AMPLITUDE * hrr_intensity * flicker), 0.0, 1.0)
 
-        if self._smoke is None or self._smoke.buffer.shape != frame.shape:
-            self._smoke = SmokeSimulator(frame.shape, ambient_c=self.vmin)
         if self._ambient_backdrop is None or self._ambient_backdrop.shape[:2] != frame.shape:
             self._ambient_backdrop = _ambient_backdrop(frame.shape)
-        density = self._smoke.step(frame, velocity_frame)
+        if smoke_density_frame is not None:
+            density = smoke_density_frame
+        else:
+            if self._smoke is None or self._smoke.buffer.shape != frame.shape:
+                self._smoke = SmokeSimulator(frame.shape, ambient_c=self.vmin)
+            density = self._smoke.step(frame, velocity_frame)
 
         idx = (t * (len(FIRE_RGBA_LUT) - 1)).astype(np.uint8)
         fire_rgba = FIRE_RGBA_LUT[idx]

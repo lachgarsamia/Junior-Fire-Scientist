@@ -18,7 +18,23 @@ SOOT_DISPLAY_SCALE = 1.0e6
 # fds/sim/ is resolved relative to this file, not the process cwd, so the
 # loader works regardless of where the application is launched from.
 _SRC_DIR = os.path.dirname(os.path.abspath(__file__))
-SIM_ROOT = os.path.join(_SRC_DIR, '..', 'fds', 'sim')
+_LOCAL_SIM_ROOT = os.path.join(_SRC_DIR, '..', 'fds', 'sim')
+
+# The candle-factorial study now runs on Pleiades (see
+# FireScope/fds/sim_stage1_prep/manifest.json, which already maps each
+# c<n>_d<n>_vod<n>_voc<n> case to its "..._stage1_pleiades" output folder)
+# rather than the local fds/sim/ checkout that data was originally
+# generated into. Preferred by default when present on this machine so the
+# app shows the current runs, not the older local set; FDSVIS_SIM_ROOT
+# overrides either, and a machine without that checkout (CI, another
+# developer) transparently falls back to fds/sim/.
+_PLEIADES_SIM_ROOT = "/Users/samialachgar/Desktop/FireScope/fds/sim_stage1_prep"
+if os.environ.get('FDSVIS_SIM_ROOT'):
+    SIM_ROOT = os.environ['FDSVIS_SIM_ROOT']
+elif os.path.isdir(_PLEIADES_SIM_ROOT):
+    SIM_ROOT = _PLEIADES_SIM_ROOT
+else:
+    SIM_ROOT = _LOCAL_SIM_ROOT
 
 # Deprecated aliases for DEFAULT_SLICE_KEY's fields -- kept because
 # ScenarioStore's disk-cache filenames were already built from these names
@@ -46,6 +62,59 @@ def load_data(root_dir: str, key: SliceKey = DEFAULT_SLICE_KEY) -> np.ndarray:
     data = fds.readDataOnly(root_dir, direction=key.direction, offset=key.offset, quantity=key.quantity)
     data = np.flip(data, axis=1)
     return data
+
+
+def load_times(root_dir: str, key: SliceKey = DEFAULT_SLICE_KEY) -> np.ndarray:
+    """Real simulation timestamps (seconds), shape (n_times,), for the same
+    slice load_data() would return the data array for -- the per-frame
+    clock needed to align two different quantities recorded on different
+    output schedules (e.g. TEMPERATURE's .sf slices vs SOOT DENSITY's
+    .s3d dumps, ~481 vs ~1001 frames over the same real interval; see
+    cinema/real_smoke.py for why frame-index arithmetic alone can't do
+    this alignment).
+
+    Cheap for .sf quantities: reads only the header/time records off one
+    representative mesh block via Slice.readAllTimes(), no full data
+    decode. SOOT DENSITY has no equivalently cheap partial read (the
+    RLE-encoded .s3d format interleaves each frame's time with that
+    frame's own payload) -- this pays the same cost as load_data() itself
+    for that quantity. Callers needing both should still call load_data()
+    and load_times() separately rather than assuming one implies the
+    other; nothing here shares a cache with ScenarioStore.get()."""
+    if key.quantity == SOOT_QUANTITY:
+        from fds.s3d.s3d import extract_soot_plane
+        axis = DIRECTION_TO_AXIS[key.direction]
+        times, _extent, _frames = extract_soot_plane(root_dir, axis=axis, offset=key.plane_pos)
+        return times
+    smv_fn = fds.scanDirectory(root_dir)
+    sc = fds.readSliceInfos(os.path.join(root_dir, smv_fn))
+    meshes = fds.readMeshes(os.path.join(root_dir, smv_fn))
+    sids = fds.findSlices(sc.slices, meshes, key.quantity, key.direction, key.offset)
+    if not sids:
+        raise ValueError(f"no matching slices for {key} in {root_dir}")
+    sids[0].readAllTimes(root_dir)
+    return sids[0].all_times
+
+
+def load_data_with_times(root_dir: str, key: SliceKey = DEFAULT_SLICE_KEY) -> tuple:
+    """Like load_data() + load_times() together, but paying the real
+    parse cost only once -- for SOOT DENSITY specifically, calling
+    load_data() and load_times() separately each run their own full
+    extract_soot_plane() decode of the same `.s3d` RLE stream (measured:
+    ~5.4s combined for a scenario's first real access, vs ~2.7s for one
+    decode alone), which is exactly the redundant read ScenarioStore's
+    disk cache exists to avoid paying twice. Callers that need both the
+    data and its timestamps (ScenarioStore._load_with_disk_cache, on a
+    cache miss) should prefer this over two separate calls."""
+    if key.quantity == SOOT_QUANTITY:
+        from fds.s3d.s3d import extract_soot_plane
+        axis = DIRECTION_TO_AXIS[key.direction]
+        times, _extent, frames = extract_soot_plane(root_dir, axis=axis, offset=key.plane_pos)
+        return frames * SOOT_DISPLAY_SCALE, times
+    mesh, extent, data, mask, times = fds.readSlice(
+        root_dir, direction=key.direction, offset=key.offset, quantity=key.quantity, data_only=False)
+    data = np.flip(data, axis=1)
+    return data, times
 
 
 def load_slice_geometry(root_dir: str, key: SliceKey = DEFAULT_SLICE_KEY):

@@ -9,7 +9,7 @@ import os
 
 import numpy as np
 import pytest
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtWidgets, sip
 
 from views import SliceView, DifferenceView, EnsembleView, GridCell, ViewGrid
 from slice_key import SliceKey
@@ -182,6 +182,32 @@ class TestSliceViewCinematicMode:
         view.set_cinematic_mode(False)
         assert not view._interp_timer.isActive()
 
+    def test_interp_tick_survives_its_own_canvas_being_torn_down(self, qapp):
+        """Root-cause regression guard for a real, reproduced crash
+        (scratchpad/repro_reentrancy.py, 100% reproducible): _interp_timer
+        is a repeating QTimer parented to self.canvas, but a tick already
+        queued in the event loop can still fire after self.canvas's C++
+        object has been torn down (e.g. the last Python reference to the
+        owning window dropped without an explicit close()/deleteLater()
+        first -- ordinary Qt parent-child ownership doesn't guarantee the
+        timer's own pending event is retracted in time). Before this fix,
+        _interp_tick's own self.canvas.blit_update() call raised
+        RuntimeError: wrapped C/C++ object ... has been deleted, escaping
+        through a Qt-invoked slot -- on this PyQt/Qt version, an uncaught
+        Python exception there aborts the whole process (SIGABRT) rather
+        than raising something callable code could catch. sip.delete()
+        reproduces the exact teardown state directly, without needing an
+        actual second window or real GC timing."""
+        view = SliceView()
+        view.init_plot(FRAME, cmap="gist_heat", interpolation="nearest",
+                        vmin=20.0, vmax=300.0, colorbar_label="Temperature (°C)")
+        view.set_cinematic_mode(True, vmin=20.0, vmax_init=300.0)
+        view.show_frame(FRAME, next_frame=FRAME + 5.0)
+        assert view._interp_timer.isActive()
+        sip.delete(view.canvas)
+        assert sip.isdeleted(view.canvas)
+        view._interp_tick()   # must not raise / must not abort the process
+
 
 class TestSliceViewEmberParticles:
     """FireLab roadmap Phase 2.1g. Regression coverage for a real bug
@@ -351,7 +377,7 @@ class TestSliceViewProbeRealData:
 
     def test_known_pixel_matches_real_data(self):
         key = SliceKey("TEMPERATURE", 1, 0)
-        case_dir = os.path.join(SIM_ROOT, "c1_d0_vod0_voc0")
+        case_dir = os.path.join(SIM_ROOT, "c1_d0_vod0_voc0_stage1_pleiades")
         data = load_data(case_dir, key)
         view = SliceView()
         view.init_plot(data[300], cmap="gist_heat", interpolation="nearest",
@@ -360,7 +386,7 @@ class TestSliceViewProbeRealData:
 
     def test_all_four_corners_match_real_data(self):
         key = SliceKey("TEMPERATURE", 1, 0)
-        case_dir = os.path.join(SIM_ROOT, "c1_d0_vod0_voc0")
+        case_dir = os.path.join(SIM_ROOT, "c1_d0_vod0_voc0_stage1_pleiades")
         data = load_data(case_dir, key)
         frame = data[300]
         view = SliceView()
@@ -630,21 +656,28 @@ class TestDifferenceViewRealData:
     elsewhere in the room (both by mean-per-frame-max and by
     time-averaged-mean) -- the door's effect on absolute temperature is
     real but too small to separate from ambient room-wide variation using
-    these coarse region statistics. For **VELOCITY**, the door band *does*
-    exceed the control band on both metrics (a directly airflow-driven
-    quantity showing the ventilation effect the roadmap's example was
-    really describing). The peak TEMPERATURE signal is spatially coherent
+    these coarse region statistics. For **VELOCITY**, the door band does
+    NOT exceed the control band on either metric either, on the current
+    production dataset (see the class-level SIM_ROOT switch to the
+    Pleiades runs): door_meanmax=0.135 vs control_meanmax=0.147,
+    door_tavg=0.0205 vs control_tavg=0.0209 -- close, but the wrong
+    direction on both. (An earlier, now-superseded local dataset did show
+    the door band exceeding control on both VELOCITY metrics; that
+    finding does not reproduce on the Pleiades data actually used by
+    default today.) The peak TEMPERATURE signal is spatially coherent
     (a smooth gradient across a 7x7 neighborhood, not an isolated noisy
     pixel) -- so the diff view is genuinely physically grounded either way,
     just not dominated by the effect ROADMAP.md's own illustrative example
-    named for the quantity it named it for. See ROADMAP.md's M2.3 section
-    for the full writeup; this test pins the specific numeric claims so a
-    future change to slice.py/the dataset can't silently invalidate them
-    without a visible test failure.
+    named for the quantity it named it for, and the door's ventilation
+    effect isn't separable from ambient room-wide variation using these
+    coarse region statistics for VELOCITY either. See ROADMAP.md's M2.3
+    section for the full writeup; this test pins the specific numeric
+    claims so a future change to slice.py/the dataset can't silently
+    invalidate them without a visible test failure.
     """
 
-    DOOR_CASE_NARROW = os.path.join(SIM_ROOT, "c1_d0_vod0_voc0")
-    DOOR_CASE_WIDE = os.path.join(SIM_ROOT, "c1_d1_vod0_voc0")
+    DOOR_CASE_NARROW = os.path.join(SIM_ROOT, "c1_d0_vod0_voc0_stage1_pleiades")
+    DOOR_CASE_WIDE = os.path.join(SIM_ROOT, "c1_d1_vod0_voc0_stage1_pleiades")
 
     @pytest.fixture(scope="class")
     def temperature_diff(self):
@@ -714,12 +747,16 @@ class TestDifferenceViewRealData:
         control_meanmax = abs_diff[:, :, control_band].max(axis=(1, 2)).mean()
         assert door_meanmax < control_meanmax
 
-    def test_velocity_door_region_exceeds_control_region(self):
-        """The genuinely verified door-width effect: VELOCITY (a direct
-        airflow measure) shows a larger difference in the door's own
-        x-band than in an unrelated control band, on both a per-frame-max
-        and a time-averaged basis -- consistent with a wider door letting
-        more air move through it."""
+    def test_velocity_door_region_does_not_exceed_control_region(self):
+        """Honest negative result on the current production (Pleiades)
+        dataset, pinned rather than glossed over: unlike an earlier, now-
+        superseded local dataset (where VELOCITY's door-band diff did
+        exceed an unrelated control band on both metrics), the door band's
+        VELOCITY signal does NOT exceed the control band's on the data
+        actually used by default today -- on either a per-frame-max or a
+        time-averaged basis. Same room-wide-variation-dominates story as
+        TEMPERATURE's own negative result above
+        (test_temperature_door_region_does_not_exceed_control_region)."""
         key = SliceKey("VELOCITY", 1, 0)
         data_wide = load_data(self.DOOR_CASE_WIDE, key)
         data_narrow = load_data(self.DOOR_CASE_NARROW, key)
@@ -734,12 +771,12 @@ class TestDifferenceViewRealData:
         abs_diff = np.abs(diff)
         door_meanmax = abs_diff[:, :, door_band].max(axis=(1, 2)).mean()
         control_meanmax = abs_diff[:, :, control_band].max(axis=(1, 2)).mean()
-        assert door_meanmax > control_meanmax
+        assert door_meanmax < control_meanmax
 
         mean_diff = diff.mean(axis=0)
         door_tavg = np.abs(mean_diff[:, door_band]).mean()
         control_tavg = np.abs(mean_diff[:, control_band]).mean()
-        assert door_tavg > control_tavg
+        assert door_tavg < control_tavg
 
 
 class TestEnsembleView:
@@ -838,7 +875,7 @@ class TestEnsembleViewRealData:
     std >= 0) across a real selection of scenarios, not just synthetic
     constants."""
 
-    CASES = ["c1_d0_vod0_voc0", "c1_d1_vod0_voc0", "c2_d0_vod0_voc0", "c2_d1_vod0_voc0"]
+    CASES = ["c1_d0_vod0_voc0_stage1_pleiades", "c1_d1_vod0_voc0_stage1_pleiades", "c2_d0_vod0_voc0_stage1_pleiades", "c2_d1_vod0_voc0_stage1_pleiades"]
 
     @pytest.fixture(scope="class")
     def arrays(self):

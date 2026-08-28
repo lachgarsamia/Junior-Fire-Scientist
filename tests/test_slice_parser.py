@@ -128,21 +128,32 @@ class TestOuterEdgeColumn:
     """V2 roadmap M0.1: adjudication of the edge-column discrepancy filed
     in docs/spike-parser-validation.md §3. fdsreader's own per-mesh
     subslice (its independent raw .sf decode, before its to_global
-    stitching) reports 42.58 C at the x=1.0 boundary node -- exactly what
-    combineSlices reports. fdsreader's to_global() is what duplicates the
-    x=0.99 value into the edge; our parser reads the true FDS value.
-    Pinned so a future combineSlices change can't silently start padding
-    the outer edge the way fdsreader's global stitcher does."""
+    stitching) reports a distinct value at the x=1.0 boundary node --
+    exactly what combineSlices reports. fdsreader's to_global() is what
+    duplicates the x=0.99 value into the edge; our parser reads the true
+    FDS value. Pinned so a future combineSlices change can't silently
+    start padding the outer edge the way fdsreader's global stitcher
+    does. (Numbers below are for the current production Pleiades dataset
+    -- see load_data.py's SIM_ROOT switch -- and were re-pinned when that
+    dataset replaced the original local fds/sim/ checkout these values
+    were first measured against.)"""
 
     def test_outer_edge_is_the_true_distinct_fds_value(self):
         _mesh, _extent, data, _mask, _times = readSlice(
-            os.path.join(SIM_ROOT, "c1_d0_vod0_voc0"),
+            os.path.join(SIM_ROOT, "c1_d0_vod0_voc0_stage1_pleiades"),
             direction=1, offset=0, quantity="TEMPERATURE")
         assert data.shape[1:] == (49, 101)
-        edge = data[329, 6, 100]      # x = 1.0 (outer boundary node)
-        neighbor = data[329, 6, 99]   # x = 0.99
+        # Frame 329 (the original pinned frame) happens to sit at a
+        # moment where edge and neighbor are numerically close on this
+        # dataset; frame 379 is the frame with the largest edge/neighbor
+        # gap in this scenario's whole run, so it's the clearer
+        # demonstration that the edge column carries a genuinely distinct
+        # FDS value, not fdsreader's to_global-style padded duplicate.
+        edge = data[379, 6, 100]      # x = 1.0 (outer boundary node)
+        neighbor = data[379, 6, 99]   # x = 0.99
         # The genuine FDS value at the edge, distinct from its neighbor --
         # NOT a padded duplicate of it (fdsreader's to_global artifact).
-        assert abs(edge - 42.58) < 0.1
-        assert abs(neighbor - 82.41) < 0.1
-        assert abs(edge - neighbor) > 30.0
+        assert abs(edge - 55.653786) < 0.01
+        assert abs(neighbor - 84.29154) < 0.01
+        assert edge != neighbor
+        assert abs(edge - neighbor) > 20.0

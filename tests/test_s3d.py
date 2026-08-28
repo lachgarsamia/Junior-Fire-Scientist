@@ -155,7 +155,7 @@ class TestExtractSootY0PlaneRealData:
     checks structural correctness against ground truth (the .sf grid
     shape) and physical plausibility, not just "it runs"."""
 
-    CASE_DIR = os.path.join(SIM_ROOT, "c1_d0_vod0_voc0")
+    CASE_DIR = os.path.join(SIM_ROOT, "c1_d0_vod0_voc0_stage1_pleiades")
 
     def test_matches_sf_grid_shape_after_stitching(self):
         from load_data import load_data
@@ -183,7 +183,7 @@ class TestLoadDataSootDispatch:
     """M2.2: load_data() routes SOOT DENSITY keys to the .s3d reader and
     scales to mg/m3, while extent comes from soot_plane_geometry."""
 
-    CASE_DIR = os.path.join(SIM_ROOT, "c1_d0_vod0_voc0")
+    CASE_DIR = os.path.join(SIM_ROOT, "c1_d0_vod0_voc0_stage1_pleiades")
 
     def test_load_data_soot_matches_scaled_extract(self):
         from load_data import load_data, SOOT_DISPLAY_SCALE

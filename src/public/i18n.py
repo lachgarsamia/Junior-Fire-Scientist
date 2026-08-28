@@ -83,6 +83,7 @@ TRANSLATIONS = {
     "thermometer_cool_spot": {"en": "🧊 Cool spot", "de": "🧊 Kühle Stelle"},
     "help_button": {"en": "What am I seeing?", "de": "Was sehe ich hier?"},
     "pause_button": {"en": "Pause", "de": "Pause"},
+    "skip_to_results": {"en": "Skip to my answer", "de": "Direkt zur Antwort"},
     "play_button": {"en": "Play", "de": "Abspielen"},
     "games_button": {"en": "Games", "de": "Spiele"},
     "back_to_exploring": {"en": "Back to exploring", "de": "Zurück zum Entdecken"},
@@ -105,7 +106,6 @@ TRANSLATIONS = {
     "tile_hot_cold": {"en": "Hot / Cold", "de": "Heiß / Kalt"},
     "tile_mystery": {"en": "Mystery", "de": "Rätsel"},
     "tile_test_idea": {"en": "Test an Idea", "de": "Idee testen"},
-    "tile_compare": {"en": "Compare", "de": "Vergleichen"},
     "tile_map_it": {"en": "Map It", "de": "Karte erstellen"},
     "games_hub_prompt": {"en": "🎮  PICK A CHALLENGE", "de": "🎮  WÄHLE EINE HERAUSFORDERUNG"},
     "games_hub_say": {"en": "🎮 Pick a challenge!", "de": "🎮 Wähle eine Herausforderung!"},
@@ -114,29 +114,39 @@ TRANSLATIONS = {
     "prompt_temp_hunt": {"en": "🌡️  TEMP HUNT", "de": "🌡️  TEMPERATUR-SUCHE"},
     "prompt_hot_cold": {"en": "🧊  HOT OR COLD?", "de": "🧊  HEISS ODER KALT?"},
     "prompt_mystery": {"en": "🔎  CAN YOU FIGURE IT OUT?", "de": "🔎  KANNST DU ES HERAUSFINDEN?"},
-    "prompt_compare": {"en": "📊  COMPARE", "de": "📊  VERGLEICHEN"},
     "prompt_map_it": {"en": "🗺️  MAP IT", "de": "🗺️  KARTE ERSTELLEN"},
-    "hotcold_find_hot": {"en": "Find somewhere HOT 🌡️", "de": "Finde eine HEISSE Stelle 🌡️"},
-    "hotcold_find_cool": {"en": "Now find somewhere COOL 🧊", "de": "Finde jetzt eine KÜHLE Stelle 🧊"},
+    # Deliberately not "find somewhere hot, then somewhere cool": the
+    # game only ever checks the *size* of the difference between the two
+    # taps (see HOTCOLD_BIG_DIFFERENCE_C), never that the first is
+    # actually the hotter of the two -- asking the child to sort hot vs.
+    # cold up front made a promise the check never kept.
+    "hotcold_find_first": {"en": "Find two spots with a BIG difference! 🌡️",
+                          "de": "Finde zwei Stellen mit einem GROSSEN Unterschied! 🌡️"},
+    "hotcold_find_second": {"en": "Now tap somewhere with a different reading! 🔍",
+                           "de": "Tippe jetzt auf eine Stelle mit einem anderen Wert! 🔍"},
     "hotcold_try_again": {"en": "Tap anywhere to try again!", "de": "Tippe irgendwo, um es nochmal zu versuchen!"},
     "temp_hunt_find_hottest": {
         "en": "🌡️ Where do you think it's hottest? Touch the firebox to find out!",
         "de": "🌡️ Wo ist es wohl am heißesten? Berühre die Feuerstelle, um es herauszufinden!"},
-    "temp_hunt_find_coolest": {"en": "🧊 Can you find the COOLEST place?",
-                              "de": "🧊 Findest du die KÜHLSTE Stelle?"},
+    "temp_hunt_find_coolest": {"en": "🧊 Can you find a COOL place?",
+                              "de": "🧊 Findest du eine KÜHLE Stelle?"},
+    # {fan} is the real on-screen control + option, e.g. "Vent 1 to HVAC"
+    # -- built from the actual explore-control data by
+    # PublicExperience._fan_control_hint_phrase, never hardcoded here
+    # (see that method's own comment for the confusing-nudge bug a
+    # generic "turn the fan on" caused).
     "mystery_hint": {
-        "en": "💨 Turn the fan ON, then touch near the ceiling and near the floor. "
+        "en": "💨 Switch {fan}, then touch near the ceiling and near the floor. "
               "Where do you think it gets cooler?",
-        "de": "💨 Schalte den Ventilator EIN und berühre dann die Stelle nahe der Decke "
+        "de": "💨 Schalte {fan} und berühre dann die Stelle nahe der Decke "
               "und nahe dem Boden. Wo wird es wohl kühler?"},
-    "compare_say": {"en": "🔧 Change the fan or candles, then compare!",
-                    "de": "🔧 Ändere den Ventilator oder die Kerzen und vergleiche dann!"},
+    "mystery_try_the_fan_first": {
+        "en": "💨 Try switching {fan} first — then tap the same spot again!",
+        "de": "💨 Schalte zuerst {fan} — dann tippe nochmal auf die gleiche Stelle!"},
+    "mystery_fan_control_and_option": {"en": "{control} to {option}", "de": "{control} auf {option}"},
+    "mystery_fan_fallback_name": {"en": "the fan", "de": "den Ventilator"},
     "map_it_say": {"en": "👆 Tap around the room to build your own temperature map!",
                    "de": "👆 Tippe im Raum herum, um deine eigene Temperaturkarte zu erstellen!"},
-    "action_what_changed": {"en": "What changed?", "de": "Was hat sich geändert?"},
-    "action_compare_this_place": {"en": "Compare this place", "de": "Diese Stelle vergleichen"},
-    "action_show_before": {"en": "Show before", "de": "Vorher zeigen"},
-    "action_hide_before": {"en": "Hide before", "de": "Vorher ausblenden"},
     "action_clear_map": {"en": "Clear map", "de": "Karte löschen"},
 
     # -- Intro / Explore -------------------------------------------------
@@ -203,9 +213,6 @@ TRANSLATIONS = {
     "trail_cleared": {"en": "🧹 Map cleared — measure some new spots!",
                       "de": "🧹 Karte gelöscht — miss ein paar neue Stellen!"},
 
-    # -- Compare game: ghost, "what changed", same-place ----------------
-    "ghost_shown_say": {"en": "👻 The dashed lines show how it looked before!",
-                        "de": "👻 Die gestrichelten Linien zeigen, wie es vorher aussah!"},
     "airflow_reacted_say": {"en": "Whoa — look at the air move!",
                             "de": "Wow — schau, wie sich die Luft bewegt!"},
     "look_closely": {"en": "Look closely…", "de": "Schau genau hin…"},
@@ -284,13 +291,6 @@ TRANSLATIONS = {
                             "de": "🔧 Du hast das Experiment verändert! Schau, was passiert ist."},
     "explore_changed_other": {"en": "🔧 You changed the experiment! Did you notice?",
                               "de": "🔧 Du hast das Experiment verändert! Hast du es bemerkt?"},
-    "compare_this_place_say": {"en": "📍 Touch a place in the fire to compare it!",
-                               "de": "📍 Berühre eine Stelle im Feuer, um sie zu vergleichen!"},
-    "what_changed_title": {"en": "🔎 What changed?", "de": "🔎 Was hat sich geändert?"},
-    "what_changed_nothing": {
-        "en": "Nothing measured here changed enough to notice yet — try a bigger change!",
-        "de": "Hier hat sich noch nichts genug verändert, um es zu bemerken — probier "
-              "eine größere Änderung!"},
     "hero_temp_at_spot": {"en": "🌡️ Temperature at this spot", "de": "🌡️ Temperatur an dieser Stelle"},
     "why_moving_air": {
         "en": "💨 Moving air carries heat from one place to another — it doesn't simply "
@@ -300,7 +300,12 @@ TRANSLATIONS = {
     "why_hot_air_rises": {"en": "🌡️ Hot air rises and spreads unevenly through the room.",
                           "de": "🌡️ Heiße Luft steigt auf und verteilt sich ungleichmäßig im Raum."},
     "target_hottest": {"en": "hottest", "de": "heißeste"},
-    "target_coolest": {"en": "coolest", "de": "kühlste"},
+    # Not "coolest": the room's ambient far-field is a wide plateau of
+    # near-identical cool cells, not one unique minimum the way the
+    # flame core is one unique maximum -- claiming the specific tapped
+    # cell is uniquely "the coolest" overclaims what the data actually
+    # shows (a real, reported false-precision complaint).
+    "target_coolest": {"en": "cool", "de": "kühle"},
     "found_spot_say": {"en": "🎉 You found the {target} place! {icon} {value:.0f}°C",
                        "de": "🎉 Du hast die {target} Stelle gefunden! {icon} {value:.0f}°C"},
     "found_spot_title": {"en": "{target} SPOT FOUND", "de": "{target} STELLE GEFUNDEN"},
@@ -311,6 +316,9 @@ TRANSLATIONS = {
     "hotcold_diff_small": {"en": "Almost the same!", "de": "Fast gleich!"},
     "hotcold_say": {"en": "🌡️ {hot:.0f}°C vs 🧊 {cool:.0f}°C — {diff}",
                     "de": "🌡️ {hot:.0f}°C vs 🧊 {cool:.0f}°C — {diff}"},
+    "hotcold_try_bigger_gap": {
+        "en": "Try tapping right by the flame or smoke for hot, and a far corner for cool!",
+        "de": "Tippe direkt bei der Flamme oder dem Rauch für heiß, und in eine ferne Ecke für kühl!"},
     "hotcold_discovery_title": {"en": "HOT VS COOL", "de": "HEISS VS KALT"},
     "hotcold_discovery_text": {
         "en": "One spot was {hot:.0f}°C, another was {cool:.0f}°C — a big difference!",
@@ -325,15 +333,27 @@ TRANSLATIONS = {
                              "de": "🤯 GLEICHER VENTILATOR. ANDERER ORT."},
     "mystery_solved_discovery_title": {"en": "SAME FAN. DIFFERENT PLACE.",
                                        "de": "GLEICHER VENTILATOR. ANDERER ORT."},
+    # {high}/{low} are the real measured directions at the ceiling/floor
+    # spots the child actually tapped ("warmer"/"cooler") -- not assumed
+    # to be any fixed combination (see _note_mystery_progress: the
+    # ceiling's own direction genuinely varies by exact tap position on
+    # this dataset, only the disagreement between the two zones is what
+    # triggers this line at all).
     "mystery_solved_discovery": {
-        "en": "The same fan cooled the ceiling but warmed the floor!",
-        "de": "Derselbe Ventilator hat die Decke gekühlt, aber den Boden gewärmt!"},
-    "mystery_progress_ceiling": {
-        "en": "❄️ Interesting! The air up here got cooler. What about down here?",
-        "de": "❄️ Interessant! Die Luft hier oben ist kühler geworden. Wie ist es weiter unten?"},
-    "mystery_progress_floor": {
-        "en": "🌡️ Wait… it got warmer down here! What about up there?",
-        "de": "🌡️ Warte… hier unten ist es wärmer geworden! Wie ist es weiter oben?"},
+        "en": "The same fan made it {high} near the ceiling but {low} near the floor!",
+        "de": "Derselbe Ventilator machte es nahe der Decke {high}, aber nahe dem Boden {low}!"},
+    # One zone measured so far, in whichever direction it actually went.
+    "mystery_progress_zone": {
+        "en": "{icon} Interesting! It got {direction} {where}. What about somewhere else?",
+        "de": "{icon} Interessant! Es wurde {direction} {where}. Wie ist es woanders?"},
+    # Both zones measured, but they agree (both warmer or both cooler) --
+    # a real result, just not the "opposite effects" surprise the mystery
+    # is actually about, so this says so honestly instead of forcing a
+    # "solved" moment that the numbers don't back.
+    "mystery_both_same_direction": {
+        "en": "🤔 Both spots got {direction} that time! Try somewhere else — does it ever go the other way?",
+        "de": "🤔 Beide Stellen wurden diesmal {direction}! Probier eine andere Stelle — "
+              "geht es manchmal auch andersherum?"},
     "verdict_much_hotter": {"en": "🌡️ Much hotter here", "de": "🌡️ Hier viel heißer"},
     "verdict_much_cooler": {"en": "❄️ Much cooler here", "de": "❄️ Hier viel kühler"},
     "verdict_almost_same": {"en": "≈ Almost the same here", "de": "≈ Fast gleich hier"},
@@ -353,7 +373,12 @@ TRANSLATIONS = {
     "countdown_testing": {"en": "🧪  Testing your idea: {icon} {label}",
                           "de": "🧪  Deine Idee wird getestet: {icon} {label}"},
     "countdown_lets_test": {"en": "🧪  Let's test it!", "de": "🧪  Lass es uns testen!"},
-    "experiment_say": {"en": "Here we go! Watch closely.", "de": "Los geht's! Schau genau hin."},
+    "experiment_say": {
+        "en": "Here we go! Watch closely — I'll tell you if your guess was right.",
+        "de": "Los geht's! Schau genau hin — ich sage dir, ob deine Vorhersage stimmte."},
+    "experiment_almost_there_say": {
+        "en": "🔬 Almost there — working out if you were right...",
+        "de": "🔬 Gleich geschafft — ich checke, ob du richtig lagst..."},
     "reveal_both_tried_say": {"en": "Now you know what {contrast} does!",
                               "de": "Jetzt weißt du, was {contrast} bewirkt!"},
     "reveal_baseline_say": {"en": "That was {baseline}. Shall we try {contrast}?",
@@ -385,11 +410,11 @@ TRANSLATIONS = {
                                  "de": "👀 Das ist wirklich passiert"},
     "reveal_headline_matched": {"en": "🎉 Your prediction matched!",
                                 "de": "🎉 Deine Vorhersage stimmte!"},
-    "reveal_headline_great_guess": {"en": "🔎 Great prediction — let's see what happened",
-                                    "de": "🔎 Tolle Vorhersage — schauen wir, was passiert ist"},
+    "reveal_headline_incorrect": {"en": "🔎 Not quite — here's what really happened",
+                                  "de": "🔎 Nicht ganz — das ist wirklich passiert"},
+    "verdict_correct_badge": {"en": "✅ CORRECT!", "de": "✅ RICHTIG!"},
+    "verdict_incorrect_badge": {"en": "❌ NOT CORRECT", "de": "❌ NICHT RICHTIG"},
     "replay_start_again": {"en": "Start again", "de": "Nochmal von vorn"},
-    "replay_try_again": {"en": "Try again", "de": "Nochmal versuchen"},
-    "replay_try_other": {"en": "Try {label}", "de": "{label} ausprobieren"},
     "science_button": {"en": "Show me the science", "de": "Zeig mir die Wissenschaft"},
     "science_back_button": {"en": "Back", "de": "Zurück"},
     "science_title_both": {"en": "🔬 You tested both", "de": "🔬 Du hast beide getestet"},

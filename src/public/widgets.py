@@ -20,6 +20,12 @@ from public import kid_language as kid
 BUTTON_MIN_HEIGHT = 66
 BUTTON_MIN_WIDTH = 190
 
+# ExploreToggle's own option buttons (OPEN/CLOSED/NARROW/WIDE/...): the
+# most their floor grows toward a button's own full-label sizeHint before
+# _update_button_elide takes over instead -- see its own setMinimumWidth
+# call for why this is capped rather than left to grow freely.
+_BUTTON_WIDTH_CAP = 64
+
 
 def _readable_text_on(bg_hex: str) -> str:
     """Dark (#1A1005, the checked-button default) or light (TEXT) text,
@@ -137,8 +143,43 @@ class BigButton(QtWidgets.QPushButton):
             QPushButton:disabled {{ background: rgba(30,36,48,180); color: {TEXT_DIM}; }}
         """)
         if tall:
-            self.setMinimumWidth(210)
             self.setStyleSheet(self.styleSheet().replace("font-size: 19px", "font-size: 22px"))
+            # 210 was a fixed floor, not a computed one -- fine for short
+            # labels ("Compare"), but shorter than what "Temp Hunt"/
+            # "Hot / Cold"/"Test an Idea" actually need at this font
+            # (measured: the games-hub tile grid genuinely overlapped
+            # tile-on-tile at 800x600 before this, not just clipped text
+            # -- an explicit setMinimumWidth smaller than the button's
+            # own content-driven minimumSizeHint() replaces it for layout
+            # purposes rather than being combined with it, same root
+            # cause as ExploreToggle's own button-width fix). Measured
+            # after the font-size swap above, which is what actually
+            # determines it.
+            self.setMinimumWidth(max(210, self.sizeHint().width()))
+
+
+class VerdictBadge(QtWidgets.QLabel):
+    """An unmistakable Correct/Incorrect pill for the "Test an idea" quiz
+    reveal (games UX pass): a visitor who taps a prediction button needs
+    a clear, immediate yes/no, not just a softly-worded headline. Sits
+    above the real measured findings, which stay exactly as detailed as
+    before -- this only makes the guess-vs-outcome verdict itself
+    unambiguous."""
+
+    def __init__(self, text: str, correct: bool, parent=None):
+        super().__init__(text, parent)
+        bg = "#22C55E" if correct else "#EF4444"
+        self.setAlignment(QtCore.Qt.AlignCenter)
+        self.setStyleSheet(f"""
+            background: {bg};
+            color: {_readable_text_on(bg)};
+            font-size: 17px;
+            font-weight: 800;
+            letter-spacing: 0.5px;
+            border-radius: 14px;
+            padding: 8px 18px;
+        """)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
 
 
 class ExploreToggle(QtWidgets.QWidget):
@@ -242,7 +283,6 @@ class ExploreToggle(QtWidgets.QWidget):
             # same reason).
             button.setMinimumHeight(44)
             button.setMaximumHeight(44)
-            button.setMinimumWidth(52)
             button.setStyleSheet(f"""
                 QPushButton {{
                     background: rgba(22, 27, 38, 210); color: {TEXT_DIM};
@@ -270,10 +310,55 @@ class ExploreToggle(QtWidgets.QWidget):
                 }}
                 QPushButton:focus {{ border: 3px solid #FFD166; }}
             """)
+            # Growing every button all the way to its own full sizeHint
+            # (the same "hard floor" fix ExploreToggle/explore_panel
+            # already use for the Vent 1 overlap) was tried first and
+            # reverted: it does stop the clipping, but the resulting
+            # control bar is wide enough, at 800x600, to cover the stat
+            # panel's own AIR TEMPERATURE chip header entirely -- a real,
+            # measured regression worse than the clipping it fixed
+            # (measured: explore_panel's right edge has only ~27px of
+            # real slack before touching that chip, far less than the
+            # ~125px full-width growth wants). _BUTTON_WIDTH_CAP is the
+            # most this floor grows toward that real need -- past it,
+            # _update_button_elide (resizeEvent) takes over so the label
+            # still reads as "cut off, and I can tell" (a trailing "…")
+            # rather than either a raw mid-word clip or the full
+            # collision. Chosen empirically as the largest cap that still
+            # leaves this chip fully clear at 800x600 -- not derived from
+            # a formula, since the two things it balances (button
+            # legibility, the chip's fixed position) don't share one.
+            button.setMinimumWidth(min(_BUTTON_WIDTH_CAP, max(52, button.sizeHint().width())))
+            # Full text kept on the button itself (not just baked into
+            # its initial .text()) so it can be *re*-elided every time
+            # this toggle's own width changes -- see resizeEvent/
+            # _update_button_elide.
+            button._full_label_text = button.text()
             self._group.addButton(button, index)
             self._values.append(option.value)
             row.addWidget(button)
         layout.addLayout(row)
+        # Hard floor, not just the automatic minimumSizeHint() a nested
+        # QHBoxLayout normally exposes to its parent: a *hint* is only
+        # advisory, and explore_panel's own available width (root's
+        # QVBoxLayout reserves a right-hand column for the stat panel,
+        # leaving this row less width than four groups actually need at
+        # 800x600) genuinely falls short of the real minimum -- Vent 1
+        # alone (3 options: open/closed/fan-on) needs ~168px and only
+        # ~92px was ever handed to it. Under that shortfall, Qt's box
+        # layout does not clamp each button at its own setMinimumWidth
+        # floor and overflow the container -- confirmed by measuring the
+        # actual button geometries, not assumed -- it shrinks every
+        # button below that floor and toward each other, so button 1's
+        # left edge lands inside button 0's own span: real, measured
+        # overlap, not just visually tight buttons. setMinimumWidth here
+        # converts the soft hint into a floor every ancestor layout must
+        # respect, so a real shortfall now overflows this widget's own
+        # right edge (still recoverable -- explore_panel's own width and
+        # the stat panel's dynamic avoidance of it both already handle
+        # that) instead of ever overlapping two buttons on top of each
+        # other.
+        self.setMinimumWidth(self.minimumSizeHint().width())
 
         if self._values:
             self._group.button(0).setChecked(True)
@@ -281,6 +366,38 @@ class ExploreToggle(QtWidgets.QWidget):
 
     def _on_clicked(self, index: int) -> None:
         self.value_changed.emit(self._values[index])
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_button_elide()
+
+    def _update_button_elide(self) -> None:
+        """Re-elide every option button to its own *current* width --
+        same idea as MeterChip's own caption eliding (_update_caption_
+        elide), applied here instead of growing button widths to fit
+        (see the comment where _full_label_text is set for why). A real
+        gap this closes: at 800x600 a button gets exactly its 52px floor
+        with zero slack (see ExploreToggle/explore_panel's own hard-
+        minimum comments), too narrow for "CLOSED"/"NARROW" at this
+        font -- previously a raw, un-elided clip with no "…" to show
+        anything was cut off at all. At a wider window, where a button
+        genuinely gets more than its floor, the full label reappears --
+        recomputed from .width() on every resize, not decided once."""
+        for index in range(len(self._values)):
+            button = self._group.button(index)
+            full_text = getattr(button, "_full_label_text", None)
+            if full_text is None:
+                continue
+            metrics = QtGui.QFontMetrics(button.font())
+            # 14px: this button's own QSS horizontal padding (5px each
+            # side unchecked, 3px checked -- 14 covers the wider,
+            # unchecked case with a couple of px to spare) plus a hair
+            # for the border. Elided against *this* button's real
+            # current width, not a group-wide constant, since Vent 1's
+            # three buttons and a two-button group don't necessarily end
+            # up the same width.
+            available = max(0, button.width() - 14)
+            button.setText(metrics.elidedText(full_text, QtCore.Qt.ElideRight, available))
 
     def flash_highlight(self, duration_ms: int = 900) -> None:
         """A brief glow around this control -- draws the eye here right
@@ -684,7 +801,19 @@ class MeterChip(QtWidgets.QFrame):
         layout.addWidget(self._value)
 
         self._phrase = QtWidgets.QLabel("")
-        self._phrase.setStyleSheet(f"color: {ACCENT}; font-size: 16px; font-weight: 600; border: none;")
+        # 16px -> 12px for flat only, the same reasoning as _value's own
+        # 30px -> 24px shrink above: measured, not guessed -- "temperature"
+        # alone (never mind "Room" in front of it) needs 94-97px at 16px,
+        # wider than this chip's whole ~79px content width, so word-wrap
+        # genuinely can't save it (there's no space inside a single word
+        # to break at) and it clipped mid-word regardless of how much
+        # *vertical* room the chip gave the phrase label -- confirmed by
+        # measuring heightForWidth() as already correctly tall enough
+        # before this change and the text still clipping, not assumed.
+        # 12px needs only ~75px for "temperature", leaving real slack.
+        phrase_size = "12px" if flat else "16px"
+        self._phrase.setStyleSheet(f"color: {ACCENT}; font-size: {phrase_size}; "
+                                   "font-weight: 600; border: none;")
         if flat:
             self._phrase.setWordWrap(True)
             enable_height_for_width(self._phrase)
@@ -696,6 +825,29 @@ class MeterChip(QtWidgets.QFrame):
         super().resizeEvent(event)
         if self._flat:
             self._update_caption_elide()
+            self._update_wrapped_height()
+
+    def _update_wrapped_height(self) -> None:
+        """Unlike Card (a real child of card_row's QLayout, where a
+        setMinimumHeight actually changes what the layout hands it),
+        this chip is positioned by direct, explicit .move()/.resize()
+        calls from PublicOverlay._position_stat_group -- no ancestor
+        layout ever reads its minimumHeight, so that fix (Card's own,
+        and ExploreToggle's analogous setMinimumWidth) doesn't apply
+        here as-is. What actually needs to happen: resize *now*, to
+        whatever height this chip's own current content needs at its
+        current width, same as _position_stat_group's own temp_h/flow_h
+        computation -- which runs correctly, but only far enough back
+        (a resize/reposition pass) that a *later* set_reading() call
+        wrapping the phrase to more lines than last time (a longer
+        phrase after a language switch, for instance, or simply this
+        being the first real reading after construction) leaves the
+        chip's height stale and too short, cutting the last line off
+        mid-word right at the box's own bottom edge -- confirmed by
+        reading _position_stat_group, not assumed: it never re-runs on
+        every set_reading(), only on its own explicit call sites."""
+        if self._flat:
+            self.resize(self.width(), self.heightForWidth(self.width()))
 
     def _update_caption_elide(self) -> None:
         """Re-elide the caption to this chip's own current width --
@@ -723,6 +875,7 @@ class MeterChip(QtWidgets.QFrame):
         self._value.setText(f"{icon} {value_text}".strip())
         self._phrase.setText(phrase)
         self.setAccessibleDescription(f"{self._caption_full_text}: {value_text}, {phrase}")
+        self._update_wrapped_height()
 
     def set_caption(self, caption: str) -> None:
         """Re-set the caption after construction -- the language toggle's
@@ -760,6 +913,35 @@ class Card(QtWidgets.QFrame):
 
     def body(self) -> QtWidgets.QVBoxLayout:
         return self._layout
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_minimum_height()
+
+    def _update_minimum_height(self) -> None:
+        """Same "hint isn't a floor" fix as ExploreToggle's own
+        setMinimumWidth (see its own comment) and MeterChip's own caption
+        eliding, applied here vertically: enable_height_for_width() alone
+        only gives root's QVBoxLayout a *hint* of how tall this card
+        needs to be at its current width, and root's own vertical budget
+        at 800x600 already runs tighter than its children's combined
+        content (several of this file's own comments say as much) --
+        under that pressure Qt compresses this card below what
+        heightForWidth() says it actually needs, rather than overflowing
+        the window, cutting off wrapped text mid-sentence with no
+        indication anything is missing. A real, measured, screenshotted
+        bug: PREDICTION's own question card cut "...ceiling. What" and
+        never rendered "happens if we switch it on?" at all. Recomputing
+        this as a hard minimumHeight (not just leaving it a hint) forces
+        every ancestor layout to actually honor it -- called on every
+        resize (this card's width isn't decided by itself, so any
+        width change needs a fresh height) and once more explicitly
+        from show_card(), since populating new content at an unchanged
+        width doesn't fire a resizeEvent on its own."""
+        width = self.width()
+        if width <= 0:
+            return
+        self.setMinimumHeight(self.heightForWidth(width))
 
     @staticmethod
     def title_label(text: str) -> QtWidgets.QLabel:

@@ -6,14 +6,18 @@ array math, see test_views.py's TestSliceViewCinematicMode for the
 SliceView/scatter-artist integration."""
 
 import numpy as np
+import pytest
 
 from cinema.bloom import apply_bloom
 from cinema.interp import lerp_frames
 from cinema.luts import FIRE_RGBA_LUT
 from cinema.particles import EmberParticles
 from cinema.pipeline import AutoExposure, EffectsPipeline, _suppress_haze_over_smoke, filmic_tonemap
+from cinema.real_smoke import REFERENCE_DENSITY, normalize_soot_density, soot_at_time
 from cinema.shimmer import HeatShimmer
 from cinema.smoke import SmokeSimulator, composite_over, smoke_rgba
+from data_provider import load_simulation_data
+from slice_key import DEFAULT_SLICE_KEY, SliceKey
 
 
 class TestFireLUT:
@@ -197,6 +201,188 @@ class TestSmokeSimulator:
             density = sim.step(frame, velocity_frame=velocity)
         assert density.sum() > 0.0
         assert np.isfinite(density).all()
+
+
+class TestSootAtTime:
+    """cinema/real_smoke.py: the temporal-alignment function Architecture
+    C depends on -- TEMPERATURE and SOOT DENSITY are recorded on
+    different real output schedules (~481 vs ~1001 frames over the same
+    interval on the real dataset), so pairing them by frame *index*
+    would silently pair mismatched instants. These use small synthetic
+    arrays (no real dataset needed) to pin down soot_at_time()'s exact
+    boundary behavior in isolation."""
+
+    TIMES = np.array([0.0, 1.0, 2.5, 4.0, 6.0])
+    FRAMES = np.array([np.full((2, 2), v) for v in (0.0, 10.0, 20.0, 40.0, 60.0)])
+
+    def test_exact_first_timestamp_returns_that_frame_unmodified(self):
+        out = soot_at_time(self.FRAMES, self.TIMES, 0.0)
+        assert (out == 0.0).all()
+
+    def test_exact_last_timestamp_returns_that_frame_unmodified(self):
+        out = soot_at_time(self.FRAMES, self.TIMES, 6.0)
+        assert (out == 60.0).all()
+
+    def test_exact_interior_timestamp_returns_that_frame_unmodified(self):
+        out = soot_at_time(self.FRAMES, self.TIMES, 2.5)
+        assert (out == 20.0).all()
+
+    def test_between_two_timestamps_matches_hand_computed_linear_interpolation(self):
+        # Halfway between t=0 (density 0) and t=1 (density 10).
+        out = soot_at_time(self.FRAMES, self.TIMES, 0.5)
+        assert out[0, 0] == pytest.approx(5.0)
+        # A non-half fraction, between t=2.5 (20) and t=4.0 (40).
+        expected = 20.0 + (3.0 - 2.5) / (4.0 - 2.5) * (40.0 - 20.0)
+        out2 = soot_at_time(self.FRAMES, self.TIMES, 3.0)
+        assert out2[0, 0] == pytest.approx(expected)
+
+    def test_no_extrapolation_before_first_timestamp(self):
+        """A target time before the recorded interval clamps to the
+        first frame -- it must never linearly project past real data."""
+        out = soot_at_time(self.FRAMES, self.TIMES, -5.0)
+        assert (out == 0.0).all()
+
+    def test_no_extrapolation_after_last_timestamp(self):
+        out = soot_at_time(self.FRAMES, self.TIMES, 100.0)
+        assert (out == 60.0).all()
+
+    def test_single_frame_series_returns_that_frame(self):
+        out = soot_at_time(self.FRAMES[:1], self.TIMES[:1], 5.0)
+        assert (out == 0.0).all()
+
+
+class TestNormalizeSootDensity:
+    def test_zero_density_is_zero_opacity(self):
+        assert normalize_soot_density(np.array([0.0]))[0] == 0.0
+
+    def test_reference_density_maps_to_full_opacity(self):
+        assert normalize_soot_density(np.array([REFERENCE_DENSITY]))[0] == pytest.approx(1.0)
+
+    def test_density_above_reference_clips_to_one_not_beyond(self):
+        assert normalize_soot_density(np.array([REFERENCE_DENSITY * 5]))[0] == 1.0
+
+    def test_never_negative(self):
+        assert normalize_soot_density(np.array([-10.0]))[0] == 0.0
+
+
+class TestEffectsPipelineRealSmokeIntegration:
+    """Confirms EffectsPipeline.render() actually uses a passed-in real
+    density directly, and -- the point of Architecture C -- never falls
+    back to instantiating the synthetic SmokeSimulator (with its
+    buoyancy/decay/reservoir constants) when real density is supplied.
+    The synthetic path is exercised separately by TestSmokeSimulator/
+    TestSmokeDoesNotHomogenizeAcrossHeight below, unchanged, since it's
+    still the fallback for callers with no real-soot alignment (the
+    researcher app's generic Cinematic fire view toggle)."""
+
+    def test_real_density_frame_is_used_directly(self):
+        shape = (10, 10)
+        pipe = EffectsPipeline(vmin=20.0, vmax_init=300.0)
+        frame = np.full(shape, 20.0, dtype=np.float32)
+        density = np.zeros(shape, dtype=np.float32)
+        density[5, 5] = 1.0
+        out = pipe.render(frame, smoke_density_frame=density)
+        assert out.shape == shape + (4,)
+        assert out[5, 5, 3] > out[0, 0, 3], "the real-density hot cell must be more opaque than empty cells"
+
+    def test_synthetic_smoke_simulator_never_instantiated_when_real_density_given(self):
+        shape = (10, 10)
+        pipe = EffectsPipeline(vmin=20.0, vmax_init=300.0)
+        frame = np.full(shape, 20.0, dtype=np.float32)
+        density = np.full(shape, 0.5, dtype=np.float32)
+        for _ in range(5):
+            pipe.render(frame, smoke_density_frame=density)
+        assert pipe._smoke is None, "the synthetic SmokeSimulator must stay uninstantiated on the real-soot path"
+
+    def test_omitting_real_density_still_falls_back_to_synthetic_smoke(self):
+        """The researcher app's generic cinematic toggle has no per-
+        scenario real-soot alignment plumbed to it -- render() without
+        smoke_density_frame must keep working exactly as before."""
+        shape = (10, 10)
+        pipe = EffectsPipeline(vmin=20.0, vmax_init=300.0)
+        frame = np.full(shape, 400.0, dtype=np.float32)
+        for _ in range(3):
+            pipe.render(frame)
+        assert pipe._smoke is not None
+        assert isinstance(pipe._smoke, SmokeSimulator)
+
+
+class TestSmokeDoesNotHomogenizeAcrossHeight:
+    """A real, reproduced regression: pushing BUOYANCY_SPEED /
+    TIER2_BASE_BUOYANCY_FRAC high enough to chase ceiling/floor density
+    ratio (~7.6 rows/frame constant vertical speed, against a 49-row
+    grid -- CFL number far above 1) made map_coordinates' semi-Lagrangian
+    step homogenize the buffer across height within ~144 frames: density
+    stopped varying with row at all and became a flat function of column
+    only -- a hard-edged vertical band with no plume shape, not real
+    stratification. The ceiling/floor ratio that version reported
+    "improved" was this homogenization, not genuine physics.
+
+    This is a distinct failure mode from "not stratified enough" (which
+    TestSmokeSimulator and the wider stratification benchmark cover) --
+    a field can have a perfectly plausible ceiling/floor ratio while
+    still being flat/broken internally, so it needs its own check.
+    Plain row-to-row correlation (row 0 vs row -1) does NOT reliably
+    catch this: healthy stratified data can *also* have a highly
+    correlated top/bottom shape (both peak near the same column, near
+    the same source) even with very different absolute magnitudes --
+    measured on this exact regression, corr ranged 0.76-0.99, which
+    overlaps the corrected field's own 0.67-0.99. What actually
+    discriminates is per-column variation across height: at least one
+    meaningfully-dense column in the broken field had essentially zero
+    density variation from ceiling to floor (coefficient of variation
+    0.01-0.04 across all 6 benchmark scenarios); the corrected field's
+    worst column is 0.08-0.14, over 2x higher than the broken field's
+    best. This test would have failed on the pre-fix constants and
+    passes on the corrected ones -- verified directly by temporarily
+    reintroducing BUOYANCY_SPEED=2.3/TIER2_BASE_BUOYANCY_FRAC=3.3 during
+    development."""
+
+    # Cases 0/4/5/9/18/21 -- the same 6-scenario benchmark the
+    # stratification fix itself is measured against (varying fan/door/
+    # candle-count configuration), so this guard exercises the same
+    # real conditions any future buoyancy-parameter change would be
+    # tuned against.
+    CASES = [0, 4, 5, 9, 18, 21]
+    MIN_COLUMN_CV = 0.05  # broken field's own worst case was 0.036; fixed field's own worst was 0.080
+
+    @pytest.fixture(scope="class")
+    def sim_data(self):
+        sim = load_simulation_data()
+        if sim.is_demo:
+            pytest.skip("real dataset not present")
+        return sim
+
+    @staticmethod
+    def _worst_column_cv(density: np.ndarray) -> float:
+        """Lowest per-column coefficient of variation (std/mean across
+        rows) among columns with meaningfully non-trivial density --
+        near 0 means that column looks identical at every height."""
+        col_mean = density.mean(axis=0)
+        peak = density.max()
+        if peak <= 0:
+            return float("inf")   # nothing produced at all; not this test's concern
+        active = col_mean > 0.1 * peak
+        if not active.any():
+            return float("inf")
+        col_std = density.std(axis=0)
+        cv = col_std[active] / np.maximum(col_mean[active], 1e-6)
+        return float(cv.min())
+
+    @pytest.mark.parametrize("case_index", CASES)
+    def test_density_varies_with_row_not_just_column(self, sim_data, case_index):
+        temperature = np.asarray(sim_data.store.get(case_index, DEFAULT_SLICE_KEY))
+        velocity = np.asarray(sim_data.store.get(case_index, SliceKey("VELOCITY", 1, 0)))
+        sim = SmokeSimulator(temperature.shape[1:], ambient_c=20.0)
+        density = None
+        for i in range(temperature.shape[0]):
+            density = sim.step(temperature[i], velocity[i])
+        worst_cv = self._worst_column_cv(density)
+        assert worst_cv > self.MIN_COLUMN_CV, (
+            f"case {case_index}: at least one meaningfully-dense column has "
+            f"coefficient of variation {worst_cv:.4f} across height (<= "
+            f"{self.MIN_COLUMN_CV}) -- density isn't varying with row, the "
+            f"buffer has homogenized (see this class's own docstring)")
 
 
 class TestSmokeCompositing:

@@ -33,7 +33,7 @@ from public.i18n import tr
 from public.overlay import PublicOverlay
 from public.scene import PublicScene, VELOCITY_KEY
 from public.sound import play_success_chime
-from public.widgets import BarCompare, HeroMetric, SecondaryMetric
+from public.widgets import BarCompare, DELIGHT, HeroMetric, SecondaryMetric, VerdictBadge
 from public.state import Phase, PublicState
 from public.story import StoryController
 from slice_key import DEFAULT_SLICE_KEY
@@ -68,9 +68,37 @@ NUDGE_LEAD_FRAMES = 36
 # be unmistakable and the room temperature to have settled.
 EXPERIMENT_END_FRAME = 400
 
+# EXPERIMENT plays for EXPERIMENT_END_FRAME / _FRAMES_PER_WALL_SECOND real
+# seconds (~17s at the current constants) with nothing but the fire on
+# screen and one line said back at the very start -- long enough that a
+# child watching for "did I get it right?" reasonably reads the silence
+# as broken (games UX pass: a real "still doesn't say if right or wrong"
+# report during exactly this wait). One reassurance partway through,
+# timed off the same real constants rather than a guessed number of ms,
+# so it always lands with room to read it before the reveal actually
+# arrives.
+EXPERIMENT_ALMOST_THERE_MS = int(EXPERIMENT_END_FRAME / _FRAMES_PER_WALL_SECOND * 1000 * 0.65)
+
 # The countdown before a run: four beats of ~400 ms.
 COUNTDOWN_STEP_MS = 400
 _COUNTDOWN_STEPS = ("3", "2", "1", "🕯️")
+
+# Hot/Cold (games UX pass): how far apart the two tapped readings must be
+# to count as a genuine "big difference," not the room's own ordinary
+# spatial noise. Deliberately its own constant, not PUBLIC_METRICS'
+# room_temp.noticeable_delta (0.3 C) -- that metric guards a *whole-scene
+# average* comparing two full scenario runs, where a fraction of a degree
+# is real and worth reporting; this compares two single-point taps in one
+# frame, where measured on this dataset a typical pair of "ordinary" room
+# spots already differs by several degrees just from thermal layering
+# (frame-to-frame p50-to-p90 spread runs ~7-10 C with candles=1, fan off).
+# Reusing 0.3 C here made nearly every tap pair "succeed" regardless of
+# whether the child had actually found a hot spot versus a cool one --
+# the bug behind "hot/cold always says big difference." 15 C clears that
+# ordinary spread while staying reachable by a child aiming for "near the
+# flame/smoke" versus "away from it" without needing to hit the hottest
+# ~1% of pixels exactly.
+HOTCOLD_BIG_DIFFERENCE_C = 15.0
 
 # Phases where tapping the heatmap measures a real temperature there.
 # Not the guided question/countdown/reveal-transition screens, where a
@@ -168,15 +196,17 @@ class PublicExperience(QtWidgets.QWidget):
         self._active_game: Optional[str] = None   # None | "hottest" | "hotcold"
         self._hotcold_stage = 0
         self._hotcold_readings: dict = {}
-        self._compare_place_armed = False
         # Which extreme "hottest"'s game is hunting for this round --
         # chosen dynamically per activation (Phase 4 section 13), not
         # two separate menu items.
         self._temp_hunt_target = "hottest"
-        # Phase 4: "Can you figure it out?" (the Mystery game) -- the one
-        # genuinely surprising real effect this dataset supports (see
-        # _render_game_mystery's docstring for the measured numbers):
-        # the fan cools the ceiling but *warms* the floor. Tracked across
+        # "Test an idea" quiz mode: the prediction buttons currently on
+        # screen, kept so _flash_prediction_choice can highlight the one
+        # actually tapped and disable the rest for the beat before the
+        # phase advances (see _render_prediction).
+        self._prediction_buttons: list = []
+        # Phase 4: "Can you figure it out?" (the Mystery game) -- the fan
+        # affecting the ceiling and the floor differently. Tracked across
         # separate "compare this place" taps so either order counts.
         # Phase 8 section 9: detection itself no longer needs the "Figure
         # it out" button pressed first -- every same-place comparison
@@ -184,8 +214,25 @@ class PublicExperience(QtWidgets.QWidget):
         # _show_same_place_comparison/_note_mystery_progress), so the
         # discovery can emerge from ordinary measuring instead of only
         # from an armed mini-game.
+        #
+        # Games UX pass: this used to hardcode "ceiling must read cooler,
+        # floor must read warmer" as the only recognized pattern -- true
+        # for the dataset this was written against, but re-measuring
+        # against the current one (see _note_mystery_progress) found the
+        # ceiling's own direction genuinely varies by exact tap position
+        # (recirculation, not a uniform layer), while the floor reliably
+        # warms. Hardcoding a direction that isn't reliably true anymore
+        # made most ceiling taps silently not count as progress at all --
+        # the real bug behind "games aren't interacting as they should."
+        # The fix tracks whichever direction each zone *actually* showed
+        # and only claims the "aha" when the two genuinely disagree,
+        # which is the actual condition the "same fan, different place"
+        # story depends on -- never assumed, always the measured sign.
         self._mystery_found_high = False
         self._mystery_found_low = False
+        self._mystery_high_warmer: Optional[bool] = None
+        self._mystery_low_warmer: Optional[bool] = None
+        self._mystery_solved = False
         # Phase 12 section 11: the real physical (x, z) of whichever
         # ceiling/floor taps satisfied the mystery pattern -- kept only
         # so the "aha" moment can highlight the *actual* two places the
@@ -225,9 +272,6 @@ class PublicExperience(QtWidgets.QWidget):
         # the same spot again reads as "revisiting a place", not opening
         # a new tool (see _match_before_trail/_on_explore_changed).
         self._before_trail: list = []
-        # Phase 5: "show before" -- a static contour of the baseline's
-        # own settled frame over the current heatmap.
-        self._ghost_visible = False
         # Phase 5: the "experiment board" -- the most recent real change
         # and the most recent real measured finding, surfaced inside the
         # Discovery Notebook (see _on_notebook_requested) rather than a
@@ -449,6 +493,9 @@ class PublicExperience(QtWidgets.QWidget):
         than one fan toggle)."""
         self._mystery_found_high = False
         self._mystery_found_low = False
+        self._mystery_high_warmer = None
+        self._mystery_low_warmer = None
+        self._mystery_solved = False
         self._mystery_high_xz = None
         self._mystery_low_xz = None
         self._discoveries = []
@@ -475,21 +522,17 @@ class PublicExperience(QtWidgets.QWidget):
         """Abandon any in-progress Fire Lab mini-game -- called on every
         scenario switch/restart/reset so a "hot" reading taken under Fan
         OFF can never end up compared against a "cool" one taken after
-        switching to Fan ON (see _handle_hotcold_tap), and a stale
-        "compare this place" arm-state never fires against the wrong
-        scenario."""
+        switching to Fan ON (see _handle_hotcold_tap)."""
         self._active_game = None
         self._hotcold_stage = 0
         self._hotcold_readings = {}
-        self._compare_place_armed = False
         self.scene.clear_dual_markers()
-        # The trail/ghost's own scene artists are cleared by
-        # PublicScene.clear_probe() (called from _load_case/_render_
-        # phase); this resets the *experience's* tracking of them so a
-        # re-render's own button declarations stay in sync.
+        # The trail's own scene artists are cleared by PublicScene.
+        # clear_probe() (called from _load_case/_render_phase); this
+        # resets the *experience's* tracking of it so a re-render's own
+        # button declarations stay in sync.
         self._temp_trail = []
         self._before_trail = []
-        self._ghost_visible = False
 
     # -- Discovery Notebook (Phase 4) -------------------------------------
     _MAX_DISCOVERIES = 4
@@ -621,25 +664,6 @@ class PublicExperience(QtWidgets.QWidget):
         self.scene.clear_trail_markers()
         self.scene.refresh()
         self.overlay.say(tr("trail_cleared"), CURIOUS)
-        self._refresh_game_buttons()
-
-    # -- Phase 5: "show before" ghost overlay -----------------------------
-    def _on_ghost_toggle_requested(self) -> None:
-        """A static dashed contour of the baseline's own settled field
-        over the current heatmap -- real data (PublicScene.
-        show_baseline_ghost reads the same store the rest of the app
-        does), never a second full heatmap or an invented overlay."""
-        if self.state.phase is not Phase.GAME_PLAY:
-            return
-        if self.state.case_index == self.state.baseline_case_index:
-            return
-        self._ghost_visible = not self._ghost_visible
-        if self._ghost_visible:
-            self.scene.show_baseline_ghost(self.state.baseline_case_index)
-            self.overlay.say(tr("ghost_shown_say"), CURIOUS)
-        else:
-            self.scene.hide_baseline_ghost()
-        self.scene.refresh()
         self._refresh_game_buttons()
 
     def _load_case(self, case_index) -> None:
@@ -907,6 +931,22 @@ class PublicExperience(QtWidgets.QWidget):
         # scheduled by whatever was on screen before -- see that method's
         # docstring for the stale-caption bug this prevents.
         self._interaction_generation += 1
+        # A pending _play_until(...) is invalidated the same way: leaving
+        # EXPERIMENT early (e.g. "Back to games" mid-run, before playback
+        # ever reaches EXPERIMENT_END_FRAME) used to leave _play_end_frame/
+        # _play_finished_cb set, armed and forgotten -- _on_time_changed
+        # has no idea the run was abandoned, so the *next* unrelated
+        # playback to cross that same frame index (a different game
+        # entirely, potentially minutes later) fired the stale
+        # _experiment_finished callback anyway: an uninvited REVEAL card
+        # yanking the child out of whatever they were actually doing, and
+        # (once quiz scoring existed) a phantom extra round added to the
+        # score. A couple of render_* methods already defensively
+        # cleared these two fields by hand (_start_free_play,
+        # _render_attract); centralizing it here covers every phase
+        # change instead of only the ones someone remembered to guard.
+        self._play_end_frame = None
+        self._play_finished_cb = None
         self.overlay.clear_buttons()
         self.overlay.clear_card()
         # Recreated (or not) by whichever handler runs below -- a stale
@@ -1018,15 +1058,12 @@ class PublicExperience(QtWidgets.QWidget):
 
     def _on_explore_tap(self, x: float, z: float, value: float) -> None:
         """A plain Explore tap: always just the real reading at that
-        point (or, on the candle/vent, what that object is) -- never a
+        point (or, on the candle, what that object is) -- never a
         mini-game reaction, since a game can't be active outside
-        Phase.GAME_PLAY."""
-        if self.scene.vent_hit(x, z, self.state.case_index):
-            self._on_vent_tapped()
-            return
-        if self.scene.vent2_hit(x, z, self.state.case_index):
-            self._on_vent2_tapped()
-            return
+        Phase.GAME_PLAY. The in-diagram vent icons are a passive display
+        of the real vent state (see PublicScene._draw_vent_object/
+        _animate_vent), not a second control -- only the Vent 1/Vent 2
+        buttons in the control bar change that state (_on_explore_changed)."""
         if self.scene.candle_hit(x, z):
             self.scene.pulse_flame()
             self._on_candle_tapped(value)
@@ -1042,13 +1079,6 @@ class PublicExperience(QtWidgets.QWidget):
         dispatches on which one (self._active_game), reusing exactly the
         same handlers Explore's own tap used to call directly."""
         game = self._active_game
-        if game in ("compare", "map", "mystery"):
-            if self.scene.vent_hit(x, z, self.state.case_index):
-                self._on_vent_tapped()
-                return
-            if self.scene.vent2_hit(x, z, self.state.case_index):
-                self._on_vent2_tapped()
-                return
         if self.scene.candle_hit(x, z):
             self.scene.pulse_flame()
             # The real hottest cell is almost always at (or right beside)
@@ -1057,9 +1087,22 @@ class PublicExperience(QtWidgets.QWidget):
             # candle callout below should swallow silently.
             if game == "hottest" and self._temp_hunt_target == "hottest":
                 self.overlay.update_thermometer(value, tr("thermometer_at_flame"))
-                self._celebrate(tr("found_flame_say", value=value))
-                self._record_discovery(
-                    "🌡️", tr("found_flame_title"), tr("found_flame_discovery", value=value))
+                # The candle sprite is a fixed visual anchor, not a
+                # guarantee the real fire is actually hot there *right
+                # now* -- early in a run (or at some frames) the real
+                # measured value at that exact point can still be near
+                # ambient. A real, reported bug: tapping the icon
+                # unconditionally celebrated "you found the hottest
+                # place!" even for a 23 C reading. Same honesty check as
+                # an ordinary (non-candle) tap -- see
+                # _HOTTEST_TAP_RADIUS_M/_HOTTEST_VALUE_TOLERANCE_FRAC's
+                # own comment -- so tapping the icon is never a free win.
+                if self.scene.hottest_guess_is_close(x, z, value, self.state.frame_index):
+                    self._celebrate(tr("found_flame_say", value=value))
+                    self._record_discovery(
+                        "🌡️", tr("found_flame_title"), tr("found_flame_discovery", value=value))
+                else:
+                    self.overlay.say(kid.heat_guess_reaction(value), CURIOUS)
                 return
             if game == "hottest":
                 # Hunting for the *coolest* place: the candle is
@@ -1072,8 +1115,15 @@ class PublicExperience(QtWidgets.QWidget):
                 self.overlay.update_thermometer(value, tr("thermometer_at_flame"))
                 self._handle_hotcold_tap(x, z, value)
                 return
-            self._on_candle_tapped(value)
-            return
+            if game != "map":
+                self._on_candle_tapped(value)
+                return
+            # Map It's whole point is reading the real temperature
+            # anywhere in the room, including right at the fire -- a tap
+            # on the candle icon used to be swallowed by the generic
+            # "here's what a candle is" callout above instead of adding
+            # a real trail point the way every other tap does. Falls
+            # through to the ordinary tap handling below, unchanged.
         self._probe_mode = "point"
         self._probe_xz = (x, z)
         self.overlay.update_thermometer(value, f"🌡️ Air — {self.scene.location_phrase(x, z)}")
@@ -1087,26 +1137,33 @@ class PublicExperience(QtWidgets.QWidget):
         if game == "mystery":
             # The whole point of this screen is comparing this exact
             # place before/after the fan -- every tap is that comparison,
-            # no separate "arm" step needed (unlike the Compare game's
-            # own "Compare this place" button, see _on_compare_place_
-            # requested).
+            # no separate "arm" step needed. But before the child has
+            # touched HVAC at all, case_index still equals
+            # baseline_case_index -- a "same place" comparison against
+            # itself is trivially "almost the same" and used to pop the
+            # full before/after card on
+            # literally the first curious tap, before there was
+            # anything to compare (a real, reproduced dead end: the
+            # card's only exit swallows the tap that should have gone
+            # to the HVAC toggle). The plain thermometer reading already
+            # given above, plus a nudge toward HVAC, is the right
+            # response until there is a genuine "after."
+            if self.state.case_index == self.state.baseline_case_index:
+                self.overlay.say(
+                    tr("mystery_try_the_fan_first", fan=self._fan_control_hint_phrase()), CURIOUS)
+                return
             self._show_same_place_comparison(x, z)
             return
         revisit = self._match_before_trail(x, z)
-        if self._compare_place_armed:
-            self._compare_place_armed = False
-            self._show_same_place_comparison(x, z)
-        elif revisit is not None:
+        if revisit is not None:
             # Phase 8 section 7/9: tapping approximately where the child
             # already measured before their last Fan/Candle change reads
-            # as revisiting that spot -- the same verdict-first
-            # before/after card "Compare this place" shows, but reached
-            # by returning to a place instead of arming a tool first.
+            # as revisiting that spot -- the verdict-first before/after
+            # card pops, reached by returning to a place rather than
+            # arming a tool first.
             self._show_same_place_comparison(revisit["x"], revisit["z"])
         elif game == "map":
             self._add_trail_point(x, z, value)
-        # game == "compare" with nothing armed and no revisit: the
-        # reading just shown above is the whole reaction.
 
     def _on_candle_tapped(self, value_c: float) -> None:
         """The child touched the candle itself, not the surrounding air --
@@ -1238,8 +1295,7 @@ class PublicExperience(QtWidgets.QWidget):
                 # value is the real vod level (0=open, 1=closed, 2=HVAC
                 # fan) -- only the fan state itself is a "whoosh"; closed
                 # is not a truthy leftover of the old open/HVAC-only
-                # control (see _toggle_explore_control_by_tap's own note
-                # on why a plain flip no longer applies here).
+                # control.
                 self.overlay.banner.flash(tr("banner_whoosh") if value == 2 else tr("banner_quiet_again"))
                 self.overlay.say(tr("explore_changed_fan"), CURIOUS)
             else:
@@ -1249,50 +1305,6 @@ class PublicExperience(QtWidgets.QWidget):
                 self._refresh_game_buttons()
 
     _VENT_PULSE_MS = 260
-
-    def _on_vent_tapped(self) -> None:
-        """The vent is a real tappable object in the scene, not just an
-        external toggle -- see _toggle_explore_control_by_tap, which
-        this and _on_vent2_tapped both share."""
-        self._toggle_explore_control_by_tap("vent1", vent_index=0)
-
-    def _on_vent2_tapped(self) -> None:
-        """The second (candle-side) vent is a real tappable object too --
-        same idea as _on_vent_tapped, against the "vent2" control and the
-        second vent line (index 1 in the shared room_vents
-        LineCollection, see PublicScene.pulse_vent)."""
-        self._toggle_explore_control_by_tap("vent2", vent_index=1)
-
-    def _toggle_explore_control_by_tap(self, control_key: str, vent_index: int) -> None:
-        """Flip the named explore control by clicking its actual toggle
-        widget (so its checked state, and everything _on_explore_changed
-        does, stays the single source of truth rather than a second code
-        path that could drift from it), then flash the tapped vent's own
-        drawn line so the tap reads as "I touched a machine and it
-        reacted", not "a setting changed" (Phase 9 section 3/11)."""
-        control = next((c for c in self._explore_controls if c.key == control_key), None)
-        toggle = self.overlay._explore_toggles.get(control_key)
-        entry = self.scene.current_entry()
-        if control is None or toggle is None or entry is None:
-            return
-        options = [opt.value for opt in control.options]
-        current = getattr(entry, control.factor, None)
-        if current not in options:
-            return
-        # Bounces between the FIRST and LAST option -- for Vent 2 (two
-        # real states) that's a plain flip, same as before. For Vent 1
-        # (three real states: open/closed/HVAC fan) it jumps straight
-        # between "resting" (open) and "fan on", the dramatic, felt
-        # change a direct tap on the physical object is for (the WHOOSH
-        # banner, the vent's own line-flash) -- landing on the quieter
-        # "closed" state in between is still real and still reachable,
-        # just via the deliberate Vent 1 button row, not this quick tap.
-        last_index = len(options) - 1
-        current_index = options.index(current)
-        next_index = 0 if current_index == last_index else last_index
-        toggle._group.button(next_index).click()
-        self.scene.pulse_vent(vent_index)
-        self._defer(self._VENT_PULSE_MS, self.scene.reset_vent_width)
 
     # TEMPORARY -- crash investigation instrumentation, see _diag_depths'
     # own comment in __init__. Wraps a suspected call site so a repro run
@@ -1364,10 +1376,24 @@ class PublicExperience(QtWidgets.QWidget):
         keeps burning for as long as they want to watch, tap, or drag
         the probe, exactly like the ATTRACT loop before anyone arrives.
         """
-        self._play_end_frame = None
-        self._play_finished_cb = None
+        # _play_end_frame/_play_finished_cb are cleared centrally in
+        # _render_phase now (see its own comment); no longer done here.
         self.time_controller.set_loop(True)
-        self.time_controller.seek(0)
+        # Skipped when already at 0 -- TimeController.seek() unconditionally
+        # emits time_changed regardless of whether the index actually moved
+        # (see its own docstring/_play_until's comment on the same
+        # inefficiency), so every single Vent/Candle/Door tap used to pay
+        # for two full cinema-pipeline renders of frame 0 in a row: one
+        # from _load_case's own seek(0) (run just before this, on the
+        # explore-control-change path -- see _on_explore_changed), and an
+        # unconditional second one here. _load_case doesn't need the fix
+        # itself since it's the *first* seek in that sequence; this is the
+        # redundant *second* one. Harmless to check unconditionally here
+        # (every other call site -- _render_observe, _render_attract's own
+        # loop-restart -- genuinely does need the seek, and a plain index
+        # comparison costs nothing when it does).
+        if self.time_controller.index != 0:
+            self.time_controller.seek(0)
         self.time_controller.play()
 
     def _sync_explore_controls_to_case(self) -> None:
@@ -1440,10 +1466,11 @@ class PublicExperience(QtWidgets.QWidget):
         self.overlay.add_button(tr("why_button"), "❓", lambda: self.overlay.say(explanation, EXPLAINING))
 
     def _open_compare_detour(self) -> None:
-        """Shared pause-and-look setup for every compare flavour ("What
-        changed?" and "Compare this place") -- a detour modelled on
-        _on_help_requested, not a phase change: closing it (_close_
-        compare) must return to exactly where OBSERVE was.
+        """Shared pause-and-look setup for every real comparison surface
+        (the Discovery Notebook, Mystery's same-place comparison) -- a
+        detour modelled on _on_help_requested, not a phase change:
+        closing it (_close_compare) must return to exactly where
+        OBSERVE was.
 
         The comparison card carries real bar charts (same widgets the
         science card uses) and is genuinely tall -- the meters and
@@ -1465,48 +1492,6 @@ class PublicExperience(QtWidgets.QWidget):
         self.overlay.set_explore_visible(False)
         self.overlay.set_prompt("")
 
-    def _on_compare_requested(self) -> None:
-        """"What changed?": the baseline the child started from versus
-        whatever they have since explored to -- reuses the exact same
-        compare_metrics/strongest_metric/secondary_metric machinery the
-        guided science card uses, so free play and the guided experiment
-        can never disagree about what a "noticeable" change is.
-        """
-        if self.state.phase is not Phase.GAME_PLAY or self._compare_open:
-            return
-        if self.state.case_index == self.state.baseline_case_index:
-            return
-        self._open_compare_detour()
-
-        baseline = self._case_measurement(self.state.baseline_case_index)
-        contrast = self._case_measurement(self.state.case_index)
-        comparisons = experiments_mod.compare_metrics(baseline, contrast)
-        hero = experiments_mod.strongest_metric(comparisons)
-        secondary = experiments_mod.secondary_metric(comparisons, hero)
-        before_label = self._label_for_case(self.state.baseline_case_index)
-        after_label = self._label_for_case(self.state.case_index)
-
-        blocks = []
-        if hero is not None:
-            blocks.append(HeroMetric(
-                f"{hero.metric.icon}  {hero.change_text()} {hero.metric.label.lower()}",
-                BarCompare(before_label, hero.baseline, after_label, hero.contrast,
-                          hero.metric.unit, hero.metric.decimals)))
-        if secondary is not None:
-            blocks.append(SecondaryMetric(
-                f"{secondary.metric.icon}  {secondary.metric.label} — {secondary.change_text()}",
-                BarCompare(before_label, secondary.baseline, after_label, secondary.contrast,
-                          secondary.metric.unit, secondary.metric.decimals, compact=True)))
-        lines = [] if blocks else [tr("what_changed_nothing")]
-        self.overlay.show_card(tr("what_changed_title"), lines, hero=blocks or None)
-        if hero is not None:
-            self._last_watched = f"{hero.metric.icon} {hero.metric.label} — {hero.change_text()}"
-        finding = kid.mascot_finding(hero) if hero is not None else ""
-        self.overlay.say(finding or tr("keep_exploring"), EXCITED if finding else CURIOUS)
-        self.overlay.add_button(tr("keep_exploring"), "🕯️", self._close_compare, primary=True)
-        if hero is not None:
-            self._add_why_button(hero.metric.explanation)
-
     def _close_compare(self) -> None:
         self._compare_open = False
         was_playing = self._resume_after_compare
@@ -1518,55 +1503,57 @@ class PublicExperience(QtWidgets.QWidget):
         if was_playing:
             self.time_controller.play()
 
-    # -- "compare this place": same physical point, two conditions ------
-    def _on_compare_place_requested(self) -> None:
-        """Arm the next real tap as a same-location comparison instead of
-        a plain reading -- see _show_same_place_comparison, dispatched
-        from _on_overlay_tapped. Only meaningful once the child has
-        actually explored something different from the baseline (gated
-        the same way "🔎 Compare" is); comparing a scenario against
-        itself has nothing to say."""
-        if self.state.phase is not Phase.GAME_PLAY:
-            return
-        if self.state.case_index == self.state.baseline_case_index:
-            return
-        self._compare_place_armed = True
-        self.overlay.say(tr("compare_this_place_say"), CURIOUS)
-
     def _note_mystery_progress(self, zone: str, delta: float, x: float, z: float) -> str:
-        """Called with a real same-place comparison's own location/delta.
-        Returns a short reaction line, or "" to fall back to the normal
-        change_line. Only ever reports what has *actually* been measured
-        -- never assumes the fan is what changed (a candle-count same-
-        place comparison simply never matches either zone/sign pair).
+        """Called with a real same-place comparison's own location/delta
+        (already gated noticeable by the caller). Returns a short
+        reaction line, or "" to fall back to the normal change_line.
+        Only ever reports what has *actually* been measured -- never
+        assumes the fan is what changed (a candle-count same-place
+        comparison simply never matches zone "ceiling"/"floor" at all).
 
         `zone` is the stable, language-independent id from
         PublicScene.location_zone() ("ceiling"/"floor"/...), not the
         translated display phrase -- this logic must keep working
         identically regardless of the current UI language.
 
-        Staged as its own small discovery, not a single "solved" card
-        (Phase 7 section 7): the first zone found gets a reaction plus a
-        nudge toward the other one, and only the second zone reveals the
-        "same fan, different place" punchline. Records the real (x, z)
-        of each zone (Phase 12 section 11) so the "aha" moment can
-        highlight the *actual* two spots the child measured, not
-        invented ones."""
-        if zone == "ceiling" and delta < 0:
+        Every noticeable ceiling or floor reading counts as progress in
+        that zone, in whichever direction it actually went -- the
+        direction is *not* assumed (see this method's own state-field
+        comments on why an assumed direction was the actual bug). The
+        "aha" only fires once both zones have a reading AND their
+        directions genuinely disagree (the real condition "same fan,
+        different place" depends on); two readings that happen to agree
+        get an honest, still-encouraging line instead of a false
+        "solved". Records the real (x, z) of each zone (Phase 12 section
+        11) so the "aha" moment can highlight the *actual* two spots the
+        child measured, not invented ones."""
+        warmer = delta > 0
+        if zone == "ceiling":
             self._mystery_found_high = True
             self._mystery_high_xz = (x, z)
-        elif zone == "floor" and delta > 0:
+            self._mystery_high_warmer = warmer
+        elif zone == "floor":
             self._mystery_found_low = True
             self._mystery_low_xz = (x, z)
+            self._mystery_low_warmer = warmer
         else:
             return ""
+        direction = tr("direction_warmer") if warmer else tr("direction_cooler")
         if self._mystery_found_high and self._mystery_found_low:
-            self._record_discovery(
-                "🔎", tr("mystery_solved_discovery_title"), tr("mystery_solved_discovery"))
-            return tr("mystery_solved_title")
-        if zone == "ceiling":
-            return tr("mystery_progress_ceiling")
-        return tr("mystery_progress_floor")
+            if self._mystery_high_warmer != self._mystery_low_warmer:
+                self._mystery_solved = True
+                self._record_discovery(
+                    "🔎", tr("mystery_solved_discovery_title"),
+                    tr("mystery_solved_discovery",
+                       high=tr("direction_warmer") if self._mystery_high_warmer
+                       else tr("direction_cooler"),
+                       low=tr("direction_warmer") if self._mystery_low_warmer
+                       else tr("direction_cooler")))
+                return tr("mystery_solved_title")
+            return tr("mystery_both_same_direction", direction=direction)
+        icon = "🌡️" if warmer else "❄️"
+        where = tr("location_near_ceiling" if zone == "ceiling" else "location_near_floor")
+        return tr("mystery_progress_zone", icon=icon, direction=direction, where=where)
 
     def _show_same_place_comparison(self, x: float, z: float) -> None:
         """The real measured temperature at physical (x, z), read from
@@ -1609,11 +1596,10 @@ class PublicExperience(QtWidgets.QWidget):
         bar = BarCompare(before_label, baseline_val, after_label, current_val, "°C", 1)
         mascot_line = verdict
         title = verdict
-        solved_before = self._mystery_found_high and self._mystery_found_low
+        solved_before = self._mystery_solved
         if noticeable:
             mascot_line = self._note_mystery_progress(zone, delta, x, z) or verdict
-        mystery_just_solved = (not solved_before
-                               and self._mystery_found_high and self._mystery_found_low)
+        mystery_just_solved = self._mystery_solved and not solved_before
         if mystery_just_solved:
             title = tr("mystery_solved_title")
             # The scene itself is the climax, not just the card (Phase 12
@@ -1651,9 +1637,9 @@ class PublicExperience(QtWidgets.QWidget):
     def _handle_hottest_guess(self, x: float, z: float, value_c: float) -> None:
         target = self._temp_hunt_target
         if target == "hottest":
-            close = self.scene.hottest_guess_is_close(x, z, self.state.frame_index)
+            close = self.scene.hottest_guess_is_close(x, z, value_c, self.state.frame_index)
         else:
-            close = self.scene.coolest_guess_is_close(x, z, self.state.frame_index)
+            close = self.scene.coolest_guess_is_close(x, z, value_c, self.state.frame_index)
         if close:
             icon = "🌡️" if target == "hottest" else "🧊"
             target_word = tr("target_hottest" if target == "hottest" else "target_coolest")
@@ -1673,7 +1659,7 @@ class PublicExperience(QtWidgets.QWidget):
                 self.scene.clear_dual_markers()
             self._hotcold_readings = {"hot": (x, z, value_c)}
             self._hotcold_stage = 1
-            self.overlay.say(tr("hotcold_find_cool"), CURIOUS)
+            self.overlay.say(tr("hotcold_find_second"), CURIOUS)
             return
         hot_x, hot_z, hot_c = self._hotcold_readings.get("hot", (x, z, value_c))
         cool_c = value_c
@@ -1686,8 +1672,7 @@ class PublicExperience(QtWidgets.QWidget):
         self.overlay.update_thermometer(hot_c, tr("thermometer_hot_spot"))
         self._defer_if_current(
             320, lambda: self.overlay.update_thermometer(cool_c, tr("thermometer_cool_spot")))
-        room_temp = next(m for m in experiments_mod.PUBLIC_METRICS if m.key == "room_temp")
-        big_difference = abs(hot_c - cool_c) >= room_temp.noticeable_delta
+        big_difference = abs(hot_c - cool_c) >= HOTCOLD_BIG_DIFFERENCE_C
         diff_word = tr("hotcold_diff_big" if big_difference else "hotcold_diff_small")
         if big_difference:
             self._celebrate(tr("hotcold_say", hot=hot_c, cool=cool_c, diff=diff_word))
@@ -1695,7 +1680,15 @@ class PublicExperience(QtWidgets.QWidget):
                 "🌡️", tr("hotcold_discovery_title"),
                 tr("hotcold_discovery_text", hot=hot_c, cool=cool_c))
         else:
-            self.overlay.say(tr("hotcold_say", hot=hot_c, cool=cool_c, diff=diff_word), CURIOUS)
+            # No confetti/chime/discovery for this one -- the whole point
+            # of the game is a *big* contrast, not any two numbers that
+            # happen to differ (see HOTCOLD_BIG_DIFFERENCE_C). The nudge
+            # names what to do differently rather than just repeating
+            # the numbers back.
+            self.overlay.say(
+                tr("hotcold_say", hot=hot_c, cool=cool_c, diff=diff_word), CURIOUS)
+            self._defer_if_current(
+                1400, lambda: self.overlay.say(tr("hotcold_try_bigger_gap"), THINKING))
 
     def _render_attract(self) -> None:
         self.overlay.set_meters_visible(False)
@@ -1713,9 +1706,9 @@ class PublicExperience(QtWidgets.QWidget):
         self.overlay.add_button(tr("attract_button"), "🕯️",
                                 self.overlay.start_requested.emit, primary=True, tall=True)
         # Idle attract: loop the baseline fire quietly behind the invite.
+        # (_play_end_frame/_play_finished_cb are cleared centrally in
+        # _render_phase now.)
         self.time_controller.set_loop(True)
-        self._play_end_frame = None
-        self._play_finished_cb = None
         self.time_controller.seek(0)
         self.time_controller.play()
 
@@ -1969,7 +1962,6 @@ class PublicExperience(QtWidgets.QWidget):
             ("🧊", tr("tile_hot_cold"), self._enter_game_hotcold),
             ("🔎", tr("tile_mystery"), self._enter_game_mystery),
             ("🧪", tr("tile_test_idea"), self._enter_game_test_idea),
-            ("📊", tr("tile_compare"), self._enter_game_compare),
             ("🗺️", tr("tile_map_it"), self._enter_game_map),
         ])
         nav = []
@@ -1998,12 +1990,6 @@ class PublicExperience(QtWidgets.QWidget):
         self.state.go_to(Phase.GAME_PLAY)
         self._render_phase()
 
-    def _enter_game_compare(self) -> None:
-        self._clear_game_state()
-        self._active_game = "compare"
-        self.state.go_to(Phase.GAME_PLAY)
-        self._render_phase()
-
     def _enter_game_map(self) -> None:
         self._clear_game_state()
         self._active_game = "map"
@@ -2026,7 +2012,6 @@ class PublicExperience(QtWidgets.QWidget):
             "hottest": self._render_game_hottest,
             "hotcold": self._render_game_hotcold,
             "mystery": self._render_game_mystery,
-            "compare": self._render_game_compare,
             "map": self._render_game_map,
         }.get(self._active_game)
         if handler is None:
@@ -2047,24 +2032,21 @@ class PublicExperience(QtWidgets.QWidget):
     def _refresh_game_buttons(self) -> None:
         """(Re-)declare the current game's own action buttons -- called
         both by _render_game_play (a full re-render) and by
-        _on_explore_changed/_add_trail_point/_on_clear_trail_requested/
-        _on_ghost_toggle_requested (a partial refresh, so a Fan/Candle
-        change or a trail edit doesn't force a full _render_phase() and
-        risk disturbing the trail/ghost still drawn on the scene).
+        _on_explore_changed/_add_trail_point/_on_clear_trail_requested
+        (a partial refresh, so a Fan/Candle change or a trail edit
+        doesn't force a full _render_phase() and risk disturbing the
+        trail still drawn on the scene).
 
         button_row keeps just the two universal BigButtons (Help, Play/
         Pause) every game screen offers -- "Back to games" and any
-        game-specific action (What changed?/Compare this place/Show
-        before/Clear map) are small nav pills instead, the same
-        overlap this class already avoids for Explore's own "Games"
-        entry (see PublicOverlay.nav_row)."""
+        game-specific action (Clear map) are small nav pills instead,
+        the same overlap this class already avoids for Explore's own
+        "Games" entry (see PublicOverlay.nav_row)."""
         self.overlay.clear_buttons()
         self._add_help_button()
         self._add_play_pause_button()
         nav = [(tr("back_to_games"), "🔙", self._on_back_to_games)]
-        if self._active_game == "compare":
-            nav += self._compare_game_nav_items()
-        elif self._active_game == "map":
+        if self._active_game == "map":
             nav += self._map_game_nav_items()
         self.overlay.set_nav_buttons(nav)
 
@@ -2080,11 +2062,39 @@ class PublicExperience(QtWidgets.QWidget):
         self.overlay.set_explore_visible(False)
         self.overlay.set_prompt(tr("prompt_hot_cold"))
         if self._hotcold_stage == 0:
-            self.overlay.say(tr("hotcold_find_hot"), CURIOUS)
+            self.overlay.say(tr("hotcold_find_first"), CURIOUS)
         elif self._hotcold_stage == 1:
-            self.overlay.say(tr("hotcold_find_cool"), CURIOUS)
+            self.overlay.say(tr("hotcold_find_second"), CURIOUS)
         else:
             self.overlay.say(tr("hotcold_try_again"), CURIOUS)
+
+    def _fan_control_hint_phrase(self) -> str:
+        """The real on-screen control + option name for "turn the fan
+        on" -- e.g. "Vent 1 to HVAC" -- looked up from the fan_on
+        choice's own factor override and the matching explore control,
+        never hardcoded. Games UX pass, item 5: the mystery's hint used
+        to just say "turn the fan ON", which names no on-screen control
+        at all (there is no button labelled "fan" -- see EXPLORE_
+        CONTROLS' own comment on why the fan is Vent 1's HVAC option,
+        not a dedicated control). A visitor acting on that generic
+        wording could tap Vent 2, or Vent 1's plain OPEN, believe they'd
+        "turned the fan on", and then get an apparently-contradicting
+        "try HVAC first" nudge -- the same real case_index guard, just
+        never satisfied because the wrong control was touched. Naming
+        the actual control removes that ambiguity at the source, rather
+        than the nudge needing to explain a mismatch after the fact.
+        Falls back to the generic wording if this study's data doesn't
+        have a fan_on choice/control (never assumed)."""
+        fan_choice = next(
+            (c for c in self.experiment.choices if c.key == "fan_on"), None)
+        if fan_choice is None or len(fan_choice.factors) != 1:
+            return tr("mystery_fan_fallback_name")
+        (factor, value), = fan_choice.factors.items()
+        control = next((c for c in self._explore_controls if c.factor == factor), None)
+        option = next((o for o in (control.options if control else ()) if o.value == value), None)
+        if control is None or option is None:
+            return tr("mystery_fan_fallback_name")
+        return tr("mystery_fan_control_and_option", control=control.label, option=option.label)
 
     def _render_game_mystery(self) -> None:
         """"Can you figure it out?": a real, measured, genuinely
@@ -2103,23 +2113,7 @@ class PublicExperience(QtWidgets.QWidget):
         self.overlay.set_explore_visible(True)
         self._sync_explore_controls_to_case()
         self.overlay.set_prompt(tr("prompt_mystery"))
-        self.overlay.say(tr("mystery_hint"), CURIOUS)
-
-    def _render_game_compare(self) -> None:
-        self.overlay.set_explore_visible(True)
-        self._sync_explore_controls_to_case()
-        self.overlay.set_prompt(tr("prompt_compare"))
-        self.overlay.say(tr("compare_say"), CURIOUS)
-
-    def _compare_game_nav_items(self) -> list:
-        if self.state.case_index == self.state.baseline_case_index:
-            return []
-        return [
-            (tr("action_what_changed"), "🔎", self._on_compare_requested),
-            (tr("action_compare_this_place"), "📍", self._on_compare_place_requested),
-            (tr("action_hide_before") if self._ghost_visible else tr("action_show_before"), "👻",
-             self._on_ghost_toggle_requested),
-        ]
+        self.overlay.say(tr("mystery_hint", fan=self._fan_control_hint_phrase()), CURIOUS)
 
     def _render_game_map(self) -> None:
         self.overlay.set_explore_visible(True)
@@ -2172,17 +2166,57 @@ class PublicExperience(QtWidgets.QWidget):
         # are the whole screen. Live numbers here also compete for the
         # height the touch targets need at 800x600.
         self.overlay.set_meters_visible(False)
-        self.overlay.say(tr("prediction_say"), THINKING)
         # The big prompt goes in the banner so the question reads from
         # across a room; the card carries the experiment's own wording.
         self.overlay.set_prompt(tr("prediction_prompt"))
         self.overlay.show_card(self.experiment.question, [])
+        self._prediction_buttons = []
         for prediction in self.experiment.predictions:
-            self.overlay.add_button(
+            button = self.overlay.add_button(
                 prediction.label, prediction.icon,
-                lambda _checked=False, k=prediction.key: self.overlay.prediction_made.emit(k),
+                lambda _checked=False, k=prediction.key: self._flash_prediction_choice(k),
                 tall=True)
+            self._prediction_buttons.append(button)
         self._add_return_nav()
+        # say() last, not first: it positions the mascot's speech bubble
+        # synchronously (PublicOverlay._say_inner -> _position_mascot),
+        # clamped against button_row's own real width so the bubble
+        # can't render over PREDICTION's three tall choice buttons (see
+        # _position_mascot's own comment) -- clear_buttons() (run
+        # centrally by _render_phase before this handler) leaves
+        # button_row empty until the loop above runs, so calling say()
+        # any earlier positions the bubble against a stale, empty row
+        # and never gets called again once the real buttons exist. A
+        # real, screenshotted bug: the bubble's own "Make a guess..."
+        # text rendered underneath the choice buttons instead of beside
+        # the mascot.
+        self.overlay.say(tr("prediction_say"), THINKING)
+
+    _PREDICTION_FLASH_MS = 260
+
+    def _flash_prediction_choice(self, prediction_key: str) -> None:
+        """Instant, visible confirmation that the tap registered: the
+        chosen button gets a bright ring and every button disables for a
+        beat, before the phase actually advances to the countdown.
+
+        Games UX pass: a prediction button that silently disappears
+        straight into the countdown reads as "nothing happened" to a
+        first-time visitor -- this is that missing acknowledgement, kept
+        separate from the *correct/incorrect* verdict (see
+        _prediction_verdict), which only the data can answer, after the
+        experiment has actually run."""
+        for button, prediction in zip(self._prediction_buttons, self.experiment.predictions):
+            # Disabled either way (a second tap during the flash must not
+            # schedule a second advance) -- the border is what marks
+            # which one was actually chosen; :disabled only restyles
+            # background/color, so it stays visible.
+            button.setEnabled(False)
+            if prediction.key == prediction_key:
+                button.setStyleSheet(
+                    button.styleSheet() + f"QPushButton {{ border: 4px solid {DELIGHT}; }}")
+        self._defer_if_current(
+            self._PREDICTION_FLASH_MS,
+            lambda k=prediction_key: self.overlay.prediction_made.emit(k))
 
     def _on_prediction(self, prediction_key: str) -> None:
         self.state.record_prediction(prediction_key)
@@ -2245,9 +2279,32 @@ class PublicExperience(QtWidgets.QWidget):
         self.overlay.say(tr("experiment_say"), CURIOUS)
         self._add_help_button()
         self._add_play_pause_button()
+        # Games UX pass: EXPERIMENT plays for real (~17-20s at the
+        # current pacing constants) before the verdict shows -- a real,
+        # reported "I give up waiting before it ever tells me anything"
+        # complaint, even with the mid-run reassurance line below. The
+        # measured comparison numbers already come from the full stored
+        # arrays regardless of which frame is on screen (see
+        # experiments.measure/_science_comparisons), so skipping ahead
+        # changes nothing about the reveal's own correctness -- only how
+        # much of the animation a visitor chose to watch first.
+        self.overlay.add_button(tr("skip_to_results"), "⏩", self._on_skip_experiment)
         self._announce_expected_change()
+        self._defer_if_current(
+            EXPERIMENT_ALMOST_THERE_MS,
+            lambda: self.overlay.say(tr("experiment_almost_there_say"), THINKING))
         self._play_until(EXPERIMENT_END_FRAME, self._experiment_finished)
         self._add_return_nav()
+
+    def _on_skip_experiment(self) -> None:
+        # Just seeking is enough: _play_until already armed _play_end_frame
+        # at EXPERIMENT_END_FRAME, and TimeController.seek() unconditionally
+        # emits time_changed -- _on_time_changed's own end-frame check
+        # fires _experiment_finished() from that exact same path a natural
+        # run reaches it through. Calling _experiment_finished() again
+        # here directly would double-fire it (double-counting the quiz
+        # score, double-rendering REVEAL).
+        self.time_controller.seek(EXPERIMENT_END_FRAME)
 
     def _announce_expected_change(self) -> None:
         """Flash the change this run is about, but only when the measured
@@ -2297,6 +2354,28 @@ class PublicExperience(QtWidgets.QWidget):
         match = next((c for c in comparisons if c.metric.key == guess.metric_key), None)
         return match is not None and match.is_noticeable
 
+    def _reveal_shows_verdict(self) -> bool:
+        """Whether this reveal has a real guess-vs-outcome verdict to
+        show at all. False only for a run of the baseline on its own
+        before the other side has ever been tried -- nothing was
+        predicted *about* that specific run yet (see _reveal_lines'
+        "ran baseline" branch), so there is nothing to score."""
+        return not (self.state.choice == self.experiment.baseline_choice
+                    and not self.experiment.all_choices_tried(self.state.tried_choices))
+
+    def _prediction_verdict(self, comparisons) -> Optional[bool]:
+        """True/False if the child's guess can be checked against this
+        run's measured comparison, None if there is nothing to check
+        (no guess made, no comparisons available, or this reveal doesn't
+        show a verdict at all -- see _reveal_shows_verdict). The single
+        source of truth for both the reveal's headline and its badge, so
+        they can never disagree."""
+        guess = self.experiment.prediction(self.state.prediction)
+        if guess is None or not comparisons or not self._reveal_shows_verdict():
+            return None
+        return (self.state.prediction == self.experiment.supported_prediction
+                and self._guess_is_borne_out(guess, comparisons))
+
     @staticmethod
     def _sentence(clause: str) -> str:
         """A clause from kid_language as a standalone sentence. str's own
@@ -2304,7 +2383,7 @@ class PublicExperience(QtWidgets.QWidget):
         return clause[0].upper() + clause[1:] if clause else ""
 
     def _reveal_lines(self) -> tuple:
-        """(headline, lines, dim_lines) for the reveal card.
+        """(headline, lines, dim_lines, verdict) for the reveal card.
 
         Structured as: what you predicted (the headline), what happened
         (the measured findings), why it matters (the leading metric's
@@ -2319,11 +2398,16 @@ class PublicExperience(QtWidgets.QWidget):
         sentence is composed mechanically from a measured direction and
         size, while an explanation is a physical claim that has to be
         declared and defended per metric (see Metric.explanation).
+
+        `verdict` (Optional[bool]) is the same True/False/None
+        _prediction_verdict already scored this run with -- carried
+        through here so the headline text and the reveal's explicit
+        Correct/Incorrect badge can never disagree about the answer.
         """
         comparisons = self._science_comparisons()
         hero = experiments_mod.strongest_metric(comparisons)
         if not comparisons:
-            return tr("reveal_headline_default"), [tr("reveal_no_comparisons_line")], []
+            return tr("reveal_headline_default"), [tr("reveal_no_comparisons_line")], [], None
 
         _, contrast_label = self._choice_labels()
         dim = []
@@ -2346,13 +2430,14 @@ class PublicExperience(QtWidgets.QWidget):
             findings = [tr("reveal_almost_nothing")]
 
         explanation = hero.metric.explanation if hero is not None else ""
+        verdict = self._prediction_verdict(comparisons)
 
         if self.experiment.all_choices_tried(self.state.tried_choices):
             baseline_label, _ = self._choice_labels()
             return (tr("reveal_both_tested_headline"),
                     [tr("reveal_seen_both", baseline=baseline_label, contrast=contrast_label)]
                     + findings[:1] + ([explanation] if explanation else []),
-                    dim)
+                    dim, verdict)
 
         # A run of the baseline on its own: the findings still describe
         # what the *other* side does, so name it and invite the comparison.
@@ -2363,35 +2448,21 @@ class PublicExperience(QtWidgets.QWidget):
             return (tr("reveal_headline_default"),
                     lines + ([explanation] if explanation else [])
                     + [tr("reveal_try_again_line")],
-                    dim)
+                    dim, None)
 
-        # Predicting is the thing being rewarded, not being right: a
-        # child who guessed differently ran exactly the same experiment
-        # and learned exactly as much. No wording here implies a wrong
-        # answer or a failure.
+        # Full quiz mode: the headline states the verdict plainly, and
+        # _render_reveal adds an explicit Correct/Incorrect badge to
+        # match -- both driven by the same `verdict` so they can't drift
+        # apart.
         guess = self.experiment.prediction(self.state.prediction)
         if guess is None:
             headline = tr("reveal_headline_no_guess")
-        elif (self.state.prediction == self.experiment.supported_prediction
-              and self._guess_is_borne_out(guess, comparisons)):
+        elif verdict:
             headline = tr("reveal_headline_matched")
         else:
-            headline = tr("reveal_headline_great_guess")
+            headline = tr("reveal_headline_incorrect")
 
-        return (headline, findings + ([explanation] if explanation else []), dim)
-
-    def _replay_invitation(self) -> tuple:
-        """(label, icon) for the replay button, phrased from what this
-        visitor has actually tried. Naming the untested side is what
-        makes a second run feel like an invitation rather than a repeat;
-        `tried_choices` stays the single source of truth."""
-        if self.experiment.all_choices_tried(self.state.tried_choices):
-            return (tr("replay_start_again"), "🔁")
-        next_key = self.experiment.next_untried_choice(self.state.tried_choices)
-        other = self.experiment.choice(next_key)
-        if other is None or next_key == self.state.choice:
-            return (tr("replay_try_again"), "🔁")
-        return (tr("replay_try_other", label=other.short), "🔎")
+        return (headline, findings + ([explanation] if explanation else []), dim, verdict)
 
     def _render_reveal(self) -> None:
         # Meters off: the card below carries the same numbers, and on a
@@ -2399,8 +2470,19 @@ class PublicExperience(QtWidgets.QWidget):
         # needs in order to wrap instead of clipping.
         self.overlay.set_meters_visible(False)
         self.overlay.set_prompt("")
-        headline, lines, dim = self._reveal_lines()
-        self.overlay.show_card(headline, lines, dim)
+        headline, lines, dim, verdict = self._reveal_lines()
+        badge = None
+        if verdict is not None:
+            # Full quiz mode (games UX pass): an explicit, unmissable
+            # Correct/Incorrect badge above the findings, plus the same
+            # confetti/chime every other "you got it" moment in Games
+            # uses -- only for a genuine correct guess, never for a miss.
+            badge = VerdictBadge(
+                tr("verdict_correct_badge") if verdict else tr("verdict_incorrect_badge"), verdict)
+            if verdict:
+                self.overlay.celebrate()
+                play_success_chime()
+        self.overlay.show_card(headline, lines, dim, hero=badge)
         # The guide reacts to the side that was actually just watched --
         # asking "did you see how much more the air was moving?" after a
         # fan-*off* run contradicts the screen.
@@ -2418,9 +2500,7 @@ class PublicExperience(QtWidgets.QWidget):
         else:
             self.overlay.say(tr("reveal_spot_what_changed"), EXCITED)
         self.overlay.add_button(tr("science_button"), "🔬",
-                                self.overlay.science_toggled.emit)
-        self.overlay.add_button(*self._replay_invitation(),
-                                self.overlay.replay_requested.emit, primary=True)
+                                self.overlay.science_toggled.emit, primary=True)
         self._add_return_nav()
 
     def _on_science_toggled(self) -> None:
@@ -2521,9 +2601,8 @@ class PublicExperience(QtWidgets.QWidget):
         finding = kid.mascot_finding(hero, both_tried) if hero is not None else ""
         self.overlay.say(finding or tr("science_fallback_say"),
                          EXPLAINING)
-        self.overlay.add_button(tr("science_back_button"), "←", self.overlay.science_toggled.emit)
-        self.overlay.add_button(*self._replay_invitation(),
-                                self.overlay.replay_requested.emit, primary=True)
+        self.overlay.add_button(tr("science_back_button"), "←", self.overlay.science_toggled.emit,
+                                primary=True)
         # No "Back to games" pill on SCIENCE: its card already fits its
         # own sizeHint with zero spare budget at 800x600 -- any chrome
         # added here (laid-out or absolutely positioned; both were tried)

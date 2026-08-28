@@ -2029,7 +2029,7 @@ class TestMultiStudyGuestStudy:
     def _guest_case_dir(self):
         import os
         from load_data import SIM_ROOT
-        return os.path.join(SIM_ROOT, "c1_d0_vod0_voc0")
+        return os.path.join(SIM_ROOT, "c1_d0_vod0_voc0_stage1_pleiades")
 
     def test_degenerate_study_builds_with_candle_ui_hidden(self, qapp):
         import os
@@ -2080,7 +2080,7 @@ class TestFactorEffectsPanel:
         import os
         from data_provider import load_study
         from load_data import SIM_ROOT
-        case_dir = os.path.join(SIM_ROOT, "c1_d0_vod0_voc0")
+        case_dir = os.path.join(SIM_ROOT, "c1_d0_vod0_voc0_stage1_pleiades")
         guest = MainWindow(load_study(case_dir))
         assert guest.factor_effects_panel is None
         guest.close()

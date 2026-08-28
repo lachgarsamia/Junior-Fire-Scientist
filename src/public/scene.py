@@ -25,16 +25,22 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Circle, Polygon, Rectangle
 from PyQt5 import QtWidgets
 
+from cinema.real_smoke import normalize_soot_density, soot_at_time
 from public import i18n
-from registry import get_quantity
+from registry import AMBIENT_C, get_quantity
 from schematic import room_overlay_geometry, _CANDLE_X, ROOM_X, ROOM_Z
-from slice_key import SliceKey, DEFAULT_SLICE_KEY
+from slice_key import SliceKey, DEFAULT_SLICE_KEY, SOOT_QUANTITY
 from summary_stats import _read_hrr_csv
 from views import SliceView, CINEMA_BG
 
 logger = logging.getLogger(__name__)
 
 VELOCITY_KEY = SliceKey("VELOCITY", 1, 0)
+# Real volumetric SOOT DENSITY, same y=0 plane every other public-mode
+# quantity reads -- see cinema/real_smoke.py for why this replaces the
+# old synthetic SmokeSimulator here (Architecture C, this session's
+# architecture audit).
+SOOT_KEY = SliceKey(SOOT_QUANTITY, 1, 0, plane_pos=0.0)
 
 # The scene renders into the left SCENE_WIDTH_FRAC of this widget, not
 # the full width -- the remaining right-hand strip is real, reserved
@@ -232,7 +238,34 @@ class PublicScene(QtWidgets.QWidget):
         self._quantity_key = DEFAULT_SLICE_KEY
         self._temperature = None   # (frames, h, w) for the current case
         self._velocity = None      # same, or None if unavailable
+        self._temp_times = None    # (frames,) real seconds, same indexing as self._temperature
+        self._soot = None          # real SOOT DENSITY (n_soot_frames, h, w), or None if unavailable
+        self._soot_times = None    # (n_soot_frames,) real seconds -- its OWN clock, denser than temp_times
         self._hrr_cache = {}
+        # Set at the end of load_case(), consumed by the very next
+        # show_frame() call -- that's the real "just switched scenarios"
+        # moment (load_case itself never touches the heatmap), so that's
+        # where a cross-dissolve actually needs to start rather than
+        # snapping straight to the new scenario's frame 0. See
+        # SliceView.start_scenario_transition's own docstring for why
+        # this isn't just always-on interpolation.
+        #
+        # Games UX pass, item 3: never actually set True right now (see
+        # load_case's own comment at the one place that used to do it) --
+        # the dissolve this drives is exactly what read as "the old
+        # flame lingering and fading" (a real, reproduced case: pause a
+        # 2-candle run at a hot frame, switch to 1 candle, and the next
+        # ~240ms of frames are lerp_frames(old-hot-frame, new-cold-
+        # frame-0, phase) -- genuinely still showing ~250-300C of the
+        # *removed* candle's heat, blended in, not a residual/leftover
+        # bug in the ember/smoke/exposure resets, which were already
+        # each correctly clearing on their own). The mechanism itself
+        # (start_scenario_transition/_transition_tick, SliceView) is left
+        # fully in place, just never armed -- whoever picks up the real
+        # Phase 2a cross-dissolve work has a working blend pipeline to
+        # tune (duration, which switches should even dissolve) rather
+        # than one to build from scratch.
+        self._pending_scenario_transition = False
         # Static candle body/wick patches for the current scenario --
         # not part of SliceView's animated-artist set (they never change
         # frame to frame), so they're tracked here and baked into the
@@ -313,7 +346,6 @@ class PublicScene(QtWidgets.QWidget):
         # can never read as implying airflow between two conditions.
         self._trail_points: list = []    # [(x, z), ...] current-scenario taps only
         self._trail_line = None
-        self._ghost_contour = None
         # Phase 9 section 3: the vent's own drawn line gets a brief
         # boosted-linewidth flash on a direct tap (see pulse_vent) -- the
         # base width is captured lazily the first time so the restore
@@ -397,6 +429,8 @@ class PublicScene(QtWidgets.QWidget):
 
         self._temperature = np.asarray(self._store.get(case_index, key))
         self._velocity = self._load_velocity(case_index)
+        self._temp_times = self._store.get_times(case_index, key)
+        self._soot, self._soot_times = self._load_soot(case_index)
 
         info = get_quantity(key.quantity)
         if self.view.ax is None:
@@ -438,6 +472,12 @@ class PublicScene(QtWidgets.QWidget):
         self._update_vent_activity(self._vent2, self.vent2_marker_position(case_index), vent2_open)
         self._draw_door_object(case_index)
         self.clear_probe()
+        # Games UX pass, item 3: NOT armed (see this flag's own __init__
+        # comment for the reproduced bug this avoids) -- a scenario
+        # switch shows the new scenario's real frame 0 immediately, a
+        # hard cut, no cross-dissolve from whatever the old scenario
+        # happened to be showing.
+        self._pending_scenario_transition = False
         return int(self._temperature.shape[0])
 
     def _draw_candles(self, case_index: int) -> None:
@@ -822,39 +862,14 @@ class PublicScene(QtWidgets.QWidget):
         dx0, dz0, dx1, dz1 = geometry["door"]
         return (dx0, dz1 - dz0)
 
-    # Tap tolerance for the vent -- same physical scale as the candle's
-    # own tap radius, making the vent a real tappable object in the scene
-    # rather than a decorative label (Phase 3 section 1/2).
-    _VENT_TAP_RADIUS_M = 0.06
-
-    def vent_hit(self, x: float, z: float, case_index) -> bool:
-        """Whether a tapped physical point (x, z) lands on the fan/HVAC
-        vent -- see PublicExperience._on_overlay_tapped, which toggles
-        the fan when this is true instead of treating it as a plain air
-        reading."""
-        position = self.vent_marker_position(case_index)
-        if position is None:
-            return False
-        vx, vz = position
-        return (abs(x - vx) <= self._VENT_TAP_RADIUS_M
-                and abs(z - vz) <= self._VENT_TAP_RADIUS_M)
-
-    def vent2_hit(self, x: float, z: float, case_index) -> bool:
-        """Same idea as vent_hit, against the second (voc) vent -- see
-        PublicExperience._on_overlay_tapped, which toggles the "vent2"
-        explore control when this is true."""
-        position = self.vent2_marker_position(case_index)
-        if position is None:
-            return False
-        vx, vz = position
-        return (abs(x - vx) <= self._VENT_TAP_RADIUS_M
-                and abs(z - vz) <= self._VENT_TAP_RADIUS_M)
-
     def pulse_vent(self, vent_index: int = 0) -> None:
         """A brief boosted-linewidth flash on one of the vent's own drawn
-        lines -- its "I felt that" acknowledgement for a direct tap (see
-        PublicExperience._on_vent_tapped/_on_vent2_tapped), the same idea
-        as the candle's pulse_flame(). A one-shot flash rather than a
+        lines -- used as an idle nudge toward the vent (see
+        PublicExperience._on_idle_vent_timeout) to draw the eye there,
+        the same idea as the candle's pulse_flame(). The vent icon
+        itself has no tap/click handling of its own -- only the Vent 1/
+        Vent 2 control-bar buttons change vent state (see
+        PublicExperience._on_explore_changed). A one-shot flash rather than a
         per-frame effect: unlike the flame, the vent segments don't
         otherwise change between ticks, so there's nothing to piggyback
         the boost onto -- the caller restores it with reset_vent_width()
@@ -1006,6 +1021,21 @@ class PublicScene(QtWidgets.QWidget):
                         "smoke will use its fixed-drift tier", case_index, e)
             return None
 
+    def _load_soot(self, case_index: int):
+        """Real SOOT DENSITY frames + their own real timestamps (a denser,
+        independent output schedule from TEMPERATURE's -- see
+        cinema/real_smoke.py) for the smoke layer. None/None if
+        unavailable for some scenario, in which case _smoke_density_at
+        falls back to no smoke rather than inventing any."""
+        try:
+            frames = np.asarray(self._store.get(case_index, SOOT_KEY))
+            times = self._store.get_times(case_index, SOOT_KEY)
+            return frames, times
+        except Exception as e:  # noqa: BLE001 - matches _load_velocity's own fallback convention
+            logger.info("SOOT DENSITY unavailable for case %s (%s); no smoke will be shown",
+                        case_index, e)
+            return None, None
+
     def _extent_for(self, case_index: int, key: SliceKey):
         try:
             extent = self._store.get_extent(case_index, key)
@@ -1034,11 +1064,39 @@ class PublicScene(QtWidgets.QWidget):
         vel = None
         if self._velocity is not None and i < self._velocity.shape[0]:
             vel = self._velocity[i]
+        smoke = self._smoke_density_at(i)
+        smoke_nxt = self._smoke_density_at(i + 1) if nxt is not None else None
         self._jitter_flame(i)
         self._animate_vent(self._vent1, i, vel)
         self._animate_vent(self._vent2, i, vel)
+        if self._pending_scenario_transition:
+            self._pending_scenario_transition = False
+            if self.view.start_scenario_transition(
+                    self._temperature[i], velocity_frame=vel,
+                    bloom_intensity=self._hrr_intensity(i)):
+                return
+            # False means there was nothing to dissolve from yet (the
+            # very first frame this scene has ever shown) -- fall
+            # through to the plain paint below, same as any other frame.
         self.view.show_frame(self._temperature[i], velocity_frame=vel,
-                             next_frame=nxt, bloom_intensity=self._hrr_intensity(i))
+                             next_frame=nxt, bloom_intensity=self._hrr_intensity(i),
+                             smoke_density_frame=smoke, smoke_density_next_frame=smoke_nxt)
+
+    def _smoke_density_at(self, temp_frame_index: int):
+        """Real SOOT DENSITY, normalized to [0,1], at the real simulation
+        time TEMPERATURE frame `temp_frame_index` was recorded at --
+        Architecture C (see cinema/real_smoke.py): no synthetic
+        transport, just the real field at the real matching instant.
+        None if this scenario has no soot data or no temperature-time
+        clock loaded (falls back to EffectsPipeline's own synthetic
+        SmokeSimulator, same as before real soot was wired in)."""
+        if self._soot is None or self._temp_times is None:
+            return None
+        if temp_frame_index < 0 or temp_frame_index >= len(self._temp_times):
+            return None
+        target_time = self._temp_times[temp_frame_index]
+        raw = soot_at_time(self._soot, self._soot_times, target_time)
+        return normalize_soot_density(raw)
 
     def _hrr_intensity(self, index: int) -> float:
         """Current HRR normalized to this scenario's own peak, so the
@@ -1161,10 +1219,28 @@ class PublicScene(QtWidgets.QWidget):
         return float(value)
 
     # -- Phase 2: mini-games and cross-scenario comparison ---------------
-    # Tap tolerance for "found the hottest place" -- generous enough for a
-    # child's finger, on the same physical scale as the candle's own tap
-    # radius (_CANDLE_TAP_RADIUS_M).
-    _HOTTEST_TAP_RADIUS_M = 0.06
+    # Tap tolerance for "found the hottest place". Games UX pass, item 4:
+    # was 0.06 m -- on this dataset's real, thin flame plume (a 1 cm
+    # grid; the hot cell count is a few percent of a row, see
+    # cinema/smoke.py's SOURCE_THRESHOLD_C measurements), a 6 cm-radius
+    # box around the true peak reaches all the way to bare ambient air:
+    # measured directly, the coolest cell inside that box came in at
+    # 20.1-20.5 C against peaks of 291-380 C, i.e. praising a tap that
+    # measured essentially room temperature as "you found the hottest
+    # place!". Tightened to 3 cm -- still real slack for a child's
+    # finger (the candle's own tap target, _CANDLE_TAP_RADIUS_M, is the
+    # same order of magnitude) -- and backed up by
+    # _HOTTEST_VALUE_TOLERANCE_FRAC below, which is what actually
+    # enforces "genuinely near the peak": position alone still can't
+    # promise that on a plume this thin.
+    _HOTTEST_TAP_RADIUS_M = 0.03
+    # The tapped reading itself must reach this fraction of the real
+    # peak's excess over ambient -- the genuine "near the flame core"
+    # requirement a radius alone can't guarantee (see above). Only
+    # applied to the "hottest" hunt: "coolest" has no equivalent unique
+    # target to fall short of (see target_coolest's own comment --
+    # ambient is most of the room), so position alone still governs it.
+    _HOTTEST_VALUE_TOLERANCE_FRAC = 0.8
 
     def _extreme_point_at(self, index: int, mode: str) -> Optional[tuple]:
         """Real (x, z, value) of the single hottest or coolest cell in
@@ -1191,22 +1267,35 @@ class PublicScene(QtWidgets.QWidget):
     def coolest_point_at(self, index: int) -> Optional[tuple]:
         return self._extreme_point_at(index, "coolest")
 
-    def _extreme_guess_is_close(self, x: float, z: float, index: int, mode: str) -> bool:
+    def _extreme_guess_is_close(self, x: float, z: float, value_c: float,
+                                 index: int, mode: str) -> bool:
         point = self._extreme_point_at(index, mode)
         if point is None:
             return False
-        target_x, target_z, _value = point
-        return (abs(x - target_x) <= self._HOTTEST_TAP_RADIUS_M
-                and abs(z - target_z) <= self._HOTTEST_TAP_RADIUS_M)
+        target_x, target_z, target_value = point
+        near_enough = (abs(x - target_x) <= self._HOTTEST_TAP_RADIUS_M
+                        and abs(z - target_z) <= self._HOTTEST_TAP_RADIUS_M)
+        if not near_enough or mode != "hottest":
+            return near_enough
+        # Position alone isn't enough on a plume this thin (see
+        # _HOTTEST_TAP_RADIUS_M's own comment) -- the tapped value has
+        # to genuinely be close to the real peak too.
+        excess = target_value - AMBIENT_C
+        if excess <= 0:
+            return True  # a degenerate (unlit/uniform) frame has no real peak to fall short of
+        return (value_c - AMBIENT_C) >= self._HOTTEST_VALUE_TOLERANCE_FRAC * excess
 
-    def hottest_guess_is_close(self, x: float, z: float, index: int) -> bool:
-        """Whether a tap at physical (x, z) counts as "found it" --
-        within a real physical tolerance of the actual measured hottest
-        cell, not a pixel-distance guess."""
-        return self._extreme_guess_is_close(x, z, index, "hottest")
+    def hottest_guess_is_close(self, x: float, z: float, value_c: float, index: int) -> bool:
+        """Whether a tap at physical (x, z) reading value_c counts as
+        "found it" -- within a real physical tolerance of the actual
+        measured hottest cell AND close to its actual temperature, not a
+        pixel-distance guess alone (see _HOTTEST_TAP_RADIUS_M's own
+        comment for why position by itself used to pass taps that landed
+        on plain ambient air)."""
+        return self._extreme_guess_is_close(x, z, value_c, index, "hottest")
 
-    def coolest_guess_is_close(self, x: float, z: float, index: int) -> bool:
-        return self._extreme_guess_is_close(x, z, index, "coolest")
+    def coolest_guess_is_close(self, x: float, z: float, value_c: float, index: int) -> bool:
+        return self._extreme_guess_is_close(x, z, value_c, index, "coolest")
 
     def measure_case_at(self, case_index, x: float, z: float, frame_index: int = -1) -> Optional[float]:
         """The real measured temperature at physical (x, z) in a scenario
@@ -1250,17 +1339,17 @@ class PublicScene(QtWidgets.QWidget):
         change so a reading never survives onto a screen it no longer
         describes.
 
-        `keep_trail` protects the temperature trail and the "show
-        before" ghost from this same blanket clear: both should persist
-        across an incidental UI change (opening/closing the Compare or
-        Discovery Notebook card while still in OBSERVE looking at the
-        exact same scenario) -- Phase 6 section 2 is explicit that a
-        child's own measurements must feel persistent, not wiped just
-        because they looked at something else for a moment. They are
-        still cleared -- via PublicExperience._clear_game_state(), not
-        here -- the moment the scenario itself actually changes (explore
-        toggle, restart, reset) or OBSERVE is left entirely, since only
-        then would either genuinely describe data no longer on screen.
+        `keep_trail` protects the temperature trail from this same
+        blanket clear: it should persist across an incidental UI change
+        (opening/closing the Discovery Notebook card while still in
+        OBSERVE looking at the exact same scenario) -- Phase 6 section 2
+        is explicit that a child's own measurements must feel
+        persistent, not wiped just because they looked at something else
+        for a moment. It is still cleared -- via PublicExperience.
+        _clear_game_state(), not here -- the moment the scenario itself
+        actually changes (explore toggle, restart, reset) or OBSERVE is
+        left entirely, since only then would it genuinely describe data
+        no longer on screen.
         """
         if self.view.ax is None:
             return
@@ -1268,7 +1357,6 @@ class PublicScene(QtWidgets.QWidget):
         self.clear_dual_markers()
         if not keep_trail:
             self.clear_trail_markers()
-            self.hide_baseline_ghost()
         self.view.canvas.blit_update(self.view._animated_artists())
 
     def show_dual_markers(self, hot_xz: tuple, cool_xz: tuple) -> None:
@@ -1379,52 +1467,6 @@ class PublicScene(QtWidgets.QWidget):
             self._trail_line.set_data([], [])
         if self.view.ax is not None:
             self.view.canvas.capture_background()
-
-    # -- Phase 5: "show before" ghost overlay -----------------------------
-    def show_baseline_ghost(self, baseline_case_index) -> None:
-        """A faint dashed contour outline of the baseline scenario's own
-        settled (last-frame) temperature field, over the current
-        heatmap -- "before/after" without ever rendering a second full
-        heatmap (Phase 5 section 6). Static once drawn (baked into the
-        background exactly like views.py's own isotherms are, since
-        matplotlib contours have no cheap per-frame "update in place"
-        primitive) -- recomputed only when re-toggled, not per tick.
-        """
-        self.hide_baseline_ghost()
-        if self.view.ax is None or self._store is None or self.view._extent is None:
-            return
-        try:
-            arr = np.asarray(self._store.get(baseline_case_index, self._quantity_key))
-        except Exception:  # noqa: BLE001 - an unavailable baseline just skips the ghost
-            return
-        if arr.size == 0:
-            return
-        frame = arr[-1]
-        x0, x1, z0, z1 = self.view._extent
-        n_z, n_x = frame.shape
-        xs = np.linspace(x0, x1, n_x)
-        zs = np.linspace(z1, z0, n_z)   # row 0 = z1 (top), matching origin='upper'
-        try:
-            # Violet, not white: room_walls (views.py) is also a white
-            # dashed line, and a "before" contour in the same color reads
-            # as a duplicated/offset room wall rather than a temperature
-            # comparison. Violet is the one hue this scene doesn't already
-            # use for something else (fire is red/orange/yellow, door/vents
-            # are blue/green/amber, trail is gold).
-            self._ghost_contour = self.view.ax.contour(
-                xs, zs, frame, levels=4, colors="#A78BFA", alpha=0.6,
-                linewidths=1.2, linestyles="dashed", zorder=9)
-        except Exception:  # noqa: BLE001 - a degenerate (uniform) frame has no contours
-            self._ghost_contour = None
-            return
-        self.view.canvas.capture_background()
-
-    def hide_baseline_ghost(self) -> None:
-        if self._ghost_contour is not None:
-            self._ghost_contour.remove()
-            self._ghost_contour = None
-            if self.view.ax is not None:
-                self.view.canvas.capture_background()
 
     def refresh(self) -> None:
         """Repaint the canvas at the current frame.

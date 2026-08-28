@@ -12,10 +12,14 @@ class TestScenarioStore:
 
     def test_store_get_returns_array(self):
         """Verify store.get returns a numpy array."""
-        # Create fake folder list and mock load_data
+        # Create fake folder list and mock load_data_with_times (what
+        # ScenarioStore._load_with_disk_cache actually calls now -- see
+        # cinema/real_smoke.py's timestamp-alignment work, which folded
+        # load_data()+load_times() into one call to avoid a redundant
+        # .s3d decode).
         folders = [f"/fake/scenario/{i}" for i in range(3)]
-        with patch("scenario_store.load_data") as mock_load:
-            mock_load.return_value = np.ones((481, 49, 101), dtype=np.float32)
+        with patch("scenario_store.load_data_with_times") as mock_load:
+            mock_load.return_value = (np.ones((481, 49, 101), dtype=np.float32), None)
             store = ScenarioStore(folders=folders, cache_size=2)
             result = store.get(0)
             assert isinstance(result, np.ndarray)
@@ -29,9 +33,9 @@ class TestScenarioStore:
             # Extract index from path to count loads per scenario
             idx = int(folder_path.split("/")[-1])
             call_count[idx] = call_count.get(idx, 0) + 1
-            return np.full((481, 49, 101), float(idx), dtype=np.float32)
+            return np.full((481, 49, 101), float(idx), dtype=np.float32), None
 
-        with patch("scenario_store.load_data", side_effect=mock_load):
+        with patch("scenario_store.load_data_with_times", side_effect=mock_load):
             store = ScenarioStore(folders=folders, cache_size=2)
 
             # Load cases 0, 1, 2 (with size=2, case 0 should be evicted)
@@ -51,9 +55,9 @@ class TestScenarioStore:
         def mock_load(folder_path, key=None):
             idx = int(folder_path.split("/")[-1])
             call_count[idx] = call_count.get(idx, 0) + 1
-            return np.ones((481, 49, 101), dtype=np.float32)
+            return np.ones((481, 49, 101), dtype=np.float32), None
 
-        with patch("scenario_store.load_data", side_effect=mock_load):
+        with patch("scenario_store.load_data_with_times", side_effect=mock_load):
             store = ScenarioStore(folders=folders, cache_size=2)
             store.get(0)
             store.get(0)  # Hit again
@@ -63,9 +67,9 @@ class TestScenarioStore:
     def test_store_returns_same_object_on_hit(self):
         """Verify cache hit returns the same numpy array object."""
         folders = [f"/fake/scenario/{i}" for i in range(3)]
-        with patch("scenario_store.load_data") as mock_load:
+        with patch("scenario_store.load_data_with_times") as mock_load:
             arr = np.ones((481, 49, 101), dtype=np.float32)
-            mock_load.return_value = arr
+            mock_load.return_value = (arr, None)
             store = ScenarioStore(folders=folders, cache_size=2)
             result1 = store.get(0)
             result2 = store.get(0)
@@ -82,9 +86,9 @@ class TestScenarioStore:
         def mock_load(folder_path, key=None):
             idx = int(folder_path.split("/")[-1])
             call_count[idx] = call_count.get(idx, 0) + 1
-            return np.ones((481, 49, 101), dtype=np.float32)
+            return np.ones((481, 49, 101), dtype=np.float32), None
 
-        with patch("scenario_store.load_data", side_effect=mock_load):
+        with patch("scenario_store.load_data_with_times", side_effect=mock_load):
             store = ScenarioStore(folders=folders, cache_size=4)
 
             def hammer():
@@ -108,8 +112,8 @@ class TestScenarioStore:
         """A bare store.get(case) must behave exactly as before M2.1 --
         equivalent to explicitly passing DEFAULT_SLICE_KEY."""
         folders = [f"/fake/scenario/{i}" for i in range(2)]
-        with patch("scenario_store.load_data") as mock_load:
-            mock_load.return_value = np.ones((481, 49, 101), dtype=np.float32)
+        with patch("scenario_store.load_data_with_times") as mock_load:
+            mock_load.return_value = (np.ones((481, 49, 101), dtype=np.float32), None)
             store = ScenarioStore(folders=folders, cache_size=2)
             store.get(0)
             mock_load.assert_called_once_with(folders[0], DEFAULT_SLICE_KEY)
@@ -124,9 +128,9 @@ class TestScenarioStore:
 
         def mock_load(folder_path, key):
             calls.append(key)
-            return np.full((481, 49, 101), 1.0 if key.quantity == "TEMPERATURE" else 2.0, dtype=np.float32)
+            return np.full((481, 49, 101), 1.0 if key.quantity == "TEMPERATURE" else 2.0, dtype=np.float32), None
 
-        with patch("scenario_store.load_data", side_effect=mock_load):
+        with patch("scenario_store.load_data_with_times", side_effect=mock_load):
             store = ScenarioStore(folders=folders, cache_size=2)
             temp_data = store.get(0, temp_key)
             vel_data = store.get(0, vel_key)
@@ -143,8 +147,8 @@ class TestScenarioStore:
         folders = ["/fake/scenario/0"]
         temp_key = SliceKey("TEMPERATURE", 1, 0)
         vel_key = SliceKey("VELOCITY", 1, 0)
-        with patch("scenario_store.load_data") as mock_load:
-            mock_load.return_value = np.ones((481, 49, 101), dtype=np.float32)
+        with patch("scenario_store.load_data_with_times") as mock_load:
+            mock_load.return_value = (np.ones((481, 49, 101), dtype=np.float32), None)
             store = ScenarioStore(folders=folders, cache_size=2)
             assert not store.is_cached(0, temp_key)
             assert not store.is_cached(0, vel_key)

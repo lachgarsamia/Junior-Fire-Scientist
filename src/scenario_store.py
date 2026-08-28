@@ -15,7 +15,7 @@ from collections import OrderedDict
 
 import numpy as np
 
-from load_data import load_data, load_slice_geometry, SIM_ROOT
+from load_data import load_data, load_data_with_times, load_slice_geometry, load_times, SIM_ROOT
 from slice_key import SliceKey, DEFAULT_SLICE_KEY
 
 logger = logging.getLogger(__name__)
@@ -65,6 +65,7 @@ class ScenarioStore:
         self.cache_dir = cache_dir
         self._cache = OrderedDict()  # scenario_index -> ndarray, ordered least- to most-recently used
         self._geometry_cache = {}     # (scenario_index, SliceKey) -> (mesh, extent, mask)
+        self._times_cache = {}        # (scenario_index, SliceKey) -> real per-frame timestamps (seconds)
         self._lock = threading.Lock()
 
     @property
@@ -94,9 +95,11 @@ class ScenarioStore:
                 self._cache.move_to_end(cache_key)
                 return cached
 
-            data = self._load_with_disk_cache(scenario_index, key)
+            data, times = self._load_with_disk_cache(scenario_index, key)
             self._cache[cache_key] = data
             self._cache.move_to_end(cache_key)
+            if times is not None and cache_key not in self._times_cache:
+                self._times_cache[cache_key] = times
             while len(self._cache) > self.cache_size:
                 (evicted_index, evicted_key_slice), _ = self._cache.popitem(last=False)
                 logger.debug("evicting scenario %d (%s) from cache", evicted_index, evicted_key_slice)
@@ -120,14 +123,36 @@ class ScenarioStore:
             _mesh, extent, _mask = geometry
             return extent
 
-    def _cache_path(self, folder: str, key: SliceKey) -> str:
+    def get_times(self, scenario_index: int, key: SliceKey = DEFAULT_SLICE_KEY) -> np.ndarray:
+        """Real simulation timestamps (seconds), shape (n_times,), for one
+        scenario/key -- the per-frame clock. Cached in memory (populated
+        as a side effect of get()'s own parse whenever possible -- see
+        _load_with_disk_cache) and on disk alongside the data array
+        itself, so a cold SOOT DENSITY access never pays its expensive
+        `.s3d` RLE decode twice (once for the array, once for the
+        timestamps load_times() would otherwise re-derive on its own --
+        measured at ~5.4s combined vs ~2.7s bundled, for a scenario's
+        first real access). Keyed the same (scenario_index, key) way as
+        get()/get_extent(), so a scenario switch can never pair one
+        scenario's times with another's data."""
+        cache_key = (scenario_index, key)
+        with self._lock:
+            times = self._times_cache.get(cache_key)
+            if times is not None:
+                return times
+            folder = self.folders[scenario_index]
+            times = self._load_times_with_disk_cache(folder, key)
+            self._times_cache[cache_key] = times
+            return times
+
+    def _cache_path(self, folder: str, key: SliceKey, suffix: str = "") -> str:
         case = os.path.basename(os.path.normpath(folder))
         name = f"{case}_{key.quantity}_dir{key.direction}_off{key.offset}"
         # plane_pos (M2.2 `.s3d` planes) only appended when set, so every
         # pre-M2.2 `.sf` cache filename is byte-for-byte unchanged.
         if key.plane_pos is not None:
             name += f"_p{key.plane_pos}"
-        return os.path.join(self.cache_dir, f"{name}.npy")
+        return os.path.join(self.cache_dir, f"{name}{suffix}.npy")
 
     @staticmethod
     def _is_cache_fresh(folder: str, cache_path: str) -> bool:
@@ -144,22 +169,57 @@ class ScenarioStore:
         newest_source_mtime = max(os.path.getmtime(f) for f in source_files)
         return cache_mtime >= newest_source_mtime
 
-    def _load_with_disk_cache(self, scenario_index: int, key: SliceKey) -> np.ndarray:
+    def _load_with_disk_cache(self, scenario_index: int, key: SliceKey) -> tuple:
+        """Returns (data, times). `times` is None only when the data came
+        from a fresh disk-cache hit written before per-quantity
+        timestamps existed (see _load_times_with_disk_cache's own
+        fallback for that case) -- every freshly-parsed load returns
+        both from the same single read (see load_data_with_times)."""
         folder = self.folders[scenario_index]
         if self.cache_dir is None:
-            return load_data(folder, key)
+            return load_data_with_times(folder, key)
 
         cache_path = self._cache_path(folder, key)
+        times_path = self._cache_path(folder, key, suffix="_times")
         if self._is_cache_fresh(folder, cache_path):
             try:
-                return np.load(cache_path, mmap_mode='r')
+                data = np.load(cache_path, mmap_mode='r')
+                times = np.load(times_path) if os.path.exists(times_path) else None
+                return data, times
             except (OSError, ValueError) as e:
                 logger.warning("disk cache at %s is unreadable (%s); re-parsing", cache_path, e)
 
-        data = load_data(folder, key)
+        data, times = load_data_with_times(folder, key)
         try:
             os.makedirs(self.cache_dir, exist_ok=True)
             np.save(cache_path, data)
+            np.save(times_path, times)
         except OSError as e:
             logger.warning("could not write disk cache at %s (%s); continuing without it", cache_path, e)
-        return data
+        return data, times
+
+    def _load_times_with_disk_cache(self, folder: str, key: SliceKey) -> np.ndarray:
+        """get_times()'s own fallback when the data array's disk cache
+        was already warm but its sibling _times.npy wasn't written yet
+        (a cache directory from before per-quantity timestamps existed).
+        Reads/writes just the small times file -- for SOOT DENSITY this
+        still pays a real `.s3d` decode (load_times's own cost, same as
+        load_data's), but only once per cache directory, not once per
+        session."""
+        if self.cache_dir is None:
+            return load_times(folder, key)
+        times_path = self._cache_path(folder, key, suffix="_times")
+        cache_path = self._cache_path(folder, key)
+        if self._is_cache_fresh(folder, times_path) or (
+                os.path.exists(times_path) and self._is_cache_fresh(folder, cache_path)):
+            try:
+                return np.load(times_path)
+            except (OSError, ValueError) as e:
+                logger.warning("times cache at %s is unreadable (%s); re-parsing", times_path, e)
+        times = load_times(folder, key)
+        try:
+            os.makedirs(self.cache_dir, exist_ok=True)
+            np.save(times_path, times)
+        except OSError as e:
+            logger.warning("could not write times cache at %s (%s); continuing without it", times_path, e)
+        return times

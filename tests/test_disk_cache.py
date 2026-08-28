@@ -25,7 +25,10 @@ class TestDiskCache:
         cold_elapsed = time.perf_counter() - t0
 
         cache_files = os.listdir(cache_dir)
-        assert len(cache_files) == 1, "expected exactly one .npy cache file to be written"
+        # One data file plus its sibling _times.npy (see
+        # load_data_with_times/ScenarioStore._load_with_disk_cache --
+        # both are written together from a single parse).
+        assert len(cache_files) == 2, "expected one data .npy and one times .npy cache file to be written"
 
         # Fresh store instance so the in-memory LRU cache can't short-circuit the disk read.
         store_warm = ScenarioStore(folders=[fixtures_dir], cache_size=1, cache_dir=cache_dir)
@@ -48,26 +51,26 @@ class TestDiskCache:
         store.get(0)  # populates disk cache
 
         cache_files = os.listdir(cache_dir)
-        assert len(cache_files) == 1
+        assert len(cache_files) == 2
 
         # Make a source file newer than the cache to force invalidation.
         source_file = os.path.join(scenario_dir, "c1_d0_vod0_voc0_0001_01.sf")
         future = time.time() + 10
         os.utime(source_file, (future, future))
 
-        real_load_data = ss_module.load_data
+        real_load_data_with_times = ss_module.load_data_with_times
         calls = []
 
-        def counting_load_data(folder, key=DEFAULT_SLICE_KEY):
+        def counting_load_data_with_times(folder, key=DEFAULT_SLICE_KEY):
             calls.append(folder)
-            return real_load_data(folder, key)
+            return real_load_data_with_times(folder, key)
 
-        ss_module.load_data = counting_load_data
+        ss_module.load_data_with_times = counting_load_data_with_times
         try:
             fresh_store = ScenarioStore(folders=[scenario_dir], cache_size=1, cache_dir=cache_dir)
             fresh_store.get(0)
         finally:
-            ss_module.load_data = real_load_data
+            ss_module.load_data_with_times = real_load_data_with_times
 
         assert len(calls) == 1, "stale disk cache should trigger a re-parse"
 
@@ -78,8 +81,9 @@ class TestDiskCache:
         original = store.get(0)
 
         cache_files = os.listdir(cache_dir)
-        assert len(cache_files) == 1
-        cache_path = os.path.join(cache_dir, cache_files[0])
+        assert len(cache_files) == 2
+        data_file = next(f for f in cache_files if not f.endswith("_times.npy"))
+        cache_path = os.path.join(cache_dir, data_file)
 
         with open(cache_path, "wb") as f:
             f.write(b"not a valid npy file")
@@ -110,15 +114,16 @@ class TestDiskCache:
         vel_key = SliceKey("VELOCITY", 1, 0)
 
         def fake_load(folder_path, key):
-            return np.full((2, 2, 2), 1.0 if key.quantity == "TEMPERATURE" else 2.0, dtype=np.float32)
+            return np.full((2, 2, 2), 1.0 if key.quantity == "TEMPERATURE" else 2.0, dtype=np.float32), None
 
-        with patch("scenario_store.load_data", side_effect=fake_load):
+        with patch("scenario_store.load_data_with_times", side_effect=fake_load):
             store = ScenarioStore(folders=[folder], cache_size=2, cache_dir=cache_dir)
             store.get(0, temp_key)
             store.get(0, vel_key)
 
         cache_files = sorted(os.listdir(cache_dir))
-        assert len(cache_files) == 2, f"expected 2 distinct cache files, got {cache_files}"
+        # Each key writes a data file and a sibling _times.npy file.
+        assert len(cache_files) == 4, f"expected 4 distinct cache files, got {cache_files}"
         assert any("TEMPERATURE" in f for f in cache_files)
         assert any("VELOCITY" in f for f in cache_files)
 
@@ -137,15 +142,16 @@ class TestDiskCache:
         temp = SliceKey("TEMPERATURE", 1, 0)
 
         def fake_load(folder_path, key):
-            return np.full((2, 2, 2), 1.0, dtype=np.float32)
+            return np.full((2, 2, 2), 1.0, dtype=np.float32), None
 
-        with patch("scenario_store.load_data", side_effect=fake_load):
+        with patch("scenario_store.load_data_with_times", side_effect=fake_load):
             store = ScenarioStore(folders=[folder], cache_size=3, cache_dir=cache_dir)
             store.get(0, side)
             store.get(0, doorway)
             store.get(0, temp)
 
         cache_files = sorted(os.listdir(cache_dir))
-        assert len(cache_files) == 3, f"expected 3 distinct cache files, got {cache_files}"
+        # Each of the 3 keys writes a data file and a sibling _times.npy file.
+        assert len(cache_files) == 6, f"expected 6 distinct cache files, got {cache_files}"
         # The .sf temperature filename keeps its pre-M2.2 form (no _p suffix).
         assert any(f.endswith("_off0.npy") for f in cache_files)

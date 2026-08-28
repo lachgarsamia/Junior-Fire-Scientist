@@ -66,6 +66,7 @@ class PublicOverlay(QtWidgets.QWidget):
         self._dragging = False
         self._explore_toggles: dict = {}
         self._thermometer_reposition_timer = None
+        self._mascot_reposition_timer = None
         # 0.0, not time.monotonic(): monotonic's own reference point is
         # already far in the past (often system boot), so this reads as
         # "long ago" from the very first seconds_since_say() call without
@@ -273,8 +274,28 @@ class PublicOverlay(QtWidgets.QWidget):
         # instead of button_row's single horizontal line, since six tiles
         # don't fit one row at 800x600.
         self.games_home_panel = QtWidgets.QWidget()
-        self.games_home_panel.setStyleSheet("background: transparent;")
+        self.games_home_panel.setObjectName("gamesHomePanel")
+        # A real panel background (same PANEL_BG/PANEL_BORDER language as
+        # explore_panel/stat_panel/Card), not "background: transparent" --
+        # this grid sits directly over the live scene, and a transparent
+        # backdrop let the flame/room bleed through the gaps between
+        # tiles (and faintly through each tile's own ~92%-opaque fill), a
+        # real, screenshotted "the tiles look like they're floating in
+        # the fire" complaint. WA_StyledBackground is what makes a bare
+        # QWidget's own QSS background actually paint (explore_panel's
+        # own comment explains why); scoped by #gamesHomePanel, not a
+        # bare `QWidget {...}` rule, so it doesn't cascade onto the
+        # BigButton tiles inside it.
+        self.games_home_panel.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+        self.games_home_panel.setStyleSheet(f"""
+            QWidget#gamesHomePanel {{
+                background: {PANEL_BG};
+                border: 1px solid {PANEL_BORDER};
+                border-radius: 16px;
+            }}
+        """)
         self._games_grid = QtWidgets.QGridLayout(self.games_home_panel)
+        self._games_grid.setContentsMargins(14, 14, 14, 14)
         self._games_grid.setSpacing(14)
         self.games_home_panel.hide()
         root.addWidget(self.games_home_panel)
@@ -656,6 +677,32 @@ class PublicOverlay(QtWidgets.QWidget):
             self._explore_insert_index += 1
             self._explore_toggles[control.key] = toggle
         self.explore_panel.setVisible(bool(controls))
+        # Same "hint isn't a floor" fix as ExploreToggle's own
+        # setMinimumWidth (see its own comment): explore_panel relies on
+        # root's QVBoxLayout only ever consulting its minimumSizeHint(),
+        # which root's own reserved right-hand column (for the stat
+        # panel) can and does compress below at 800x600 -- with each
+        # ExploreToggle now a hard floor, that compression no longer
+        # overlaps buttons *within* one group, but the outer
+        # explore_layout still had no hard floor of its own and would
+        # still compress *between* groups instead (Vent 1 sized
+        # correctly, then Candles starting inside Vent 1's own span --
+        # measured, not assumed). Setting this widget's own minimum
+        # width to what its layout actually needs is what makes the
+        # ancestor stop handing it a too-small rect in the first place.
+        self.explore_panel.setMinimumWidth(self._explore_layout.minimumSize().width())
+        # At 800x600 even the best available x (see _position_stat_group's
+        # own button_rights clamp) can't fully clear explore_panel's real
+        # minimum width without pushing stat_panel off the right edge of
+        # the window -- the two panels' true minimum widths genuinely
+        # don't both fit at that size. Explicit, not incidental: whichever
+        # widget happens to paint later must not be the one that decides
+        # whether a real control stays usable, so explore_panel is always
+        # the one on top where they do overlap -- the real buttons stay
+        # fully visible and clickable, and only the (already decorative,
+        # non-interactive) stat_panel background is the one partly
+        # covered.
+        self.explore_panel.raise_()
 
     def set_explore_values(self, values: dict) -> None:
         """Snap each toggle's checked state to an explicit value per
@@ -792,6 +839,19 @@ class PublicOverlay(QtWidgets.QWidget):
             tile.clicked.connect(callback)
             self._games_grid.addWidget(tile, index // columns, index % columns)
         self.games_home_panel.setVisible(bool(tiles))
+        # Same "hint isn't a floor" fix as explore_panel's own
+        # setMinimumWidth (see its own comment): without this,
+        # games_home_panel only offered root's layout a soft
+        # minimumSizeHint(), which root's own reserved right-hand column
+        # (for the stat panel) compressed below at 800x600 -- and unlike
+        # explore_panel's row, a QGridLayout squeezed that way doesn't
+        # just clip each tile's text, it lays two tiles' real geometry on
+        # top of each other (measured: a real, functional bug, not just
+        # cosmetic -- a tap in the overlap could hit the wrong tile's
+        # callback). Left at 0 (no floor) whenever there are no tiles, so
+        # a hidden/empty grid never forces a phantom minimum width.
+        self.games_home_panel.setMinimumWidth(
+            self._games_grid.minimumSize().width() if tiles else 0)
 
     def set_games_home_visible(self, visible: bool) -> None:
         self.games_home_panel.setVisible(visible)
@@ -937,6 +997,19 @@ class PublicOverlay(QtWidgets.QWidget):
         # window widens.
         x = self.width() - panel_w - 24
         button_rights = [b.geometry().right() for b in self._buttons if b.geometry().right() > 0]
+        # explore_panel's own right edge, same reasoning as button_rights
+        # above: ExploreToggle now enforces a hard minimum width per
+        # group (see its own comment -- Vent 1's 3-button row can no
+        # longer be squeezed thinner than real buttons need), so
+        # explore_panel can legitimately be wider than the column this
+        # panel used to assume it stayed inside. Without this, a visible
+        # (measured, not assumed) ~97px overlap opens up between the
+        # Door group's own buttons and this panel at 800x600 the moment
+        # Vent 1 needs its real width -- exactly the class of bug this
+        # method's own button_rights check already exists to avoid,
+        # just for a row it didn't know about yet.
+        if self.explore_panel.isVisible() and self.explore_panel.geometry().right() > 0:
+            button_rights.append(self.explore_panel.geometry().right())
         if button_rights:
             x = max(x, max(button_rights) + 12)
         # int(): `anchor` (and so `x`) can be a numpy.float64 -- extent
@@ -1028,7 +1101,7 @@ class PublicOverlay(QtWidgets.QWidget):
             y = min(y, self.stages.y() - self.scientist_bubble.height() - 6)
         self.scientist_bubble.move(self.scientist.x() + self.scientist.width() + 12, y)
 
-    def _position_mascot(self) -> None:
+    def _position_mascot(self, _settling: bool = False) -> None:
         """The worker mascot now stands in the true bottom-right corner
         (swapped with Dr. Funke -- see the class-level swap note in
         __init__), a full mirror of her own old bottom-right placement:
@@ -1060,11 +1133,107 @@ class PublicOverlay(QtWidgets.QWidget):
             return
         mascot = self.mascot.geometry()
         available_w = max(0, mascot.x() - 6 - margin)
+        # PREDICTION's own three *tall* choice buttons (the one screen
+        # button_row is this wide -- see _render_prediction) reach far
+        # enough right, *and* far enough down to share this bubble's own
+        # vertical band (unlike OBSERVE's shorter, higher-sitting Help/
+        # Play row), that this bubble's usual (mascot-margin-only) width
+        # let it extend clean across the button row rather than stopping
+        # short of it -- measured, not assumed: the bubble's sizeHint at
+        # the old bound spanned x=52-586/y=389-490 against a button row
+        # at x=40-470/y=338-440, real ghosted-text-behind-the-buttons
+        # overlap, not just visually close. The vertical check matters:
+        # an earlier version of this fix keyed off button_row.count()
+        # alone and clamped (then hid) the bubble on *every* screen with
+        # any button_row content at all, including OBSERVE's ambient fact
+        # bubble, whose row sits at y=354-424 while the mascot/bubble
+        # band starts at mascot.y()=544 -- no real vertical overlap
+        # there, and nothing needed clamping (a real, measured
+        # regression: bubble geometry stops updating once actually
+        # applied wrongly, since this is a per-attempt decision, not a
+        # per-screen one).
+        row_bottom = 0
+        row_right = 0
+        for i in range(self.button_row.count()):
+            button = self.button_row.itemAt(i).widget()
+            if button is None:
+                continue
+            # button_row's own geometry() understates how far its
+            # buttons actually reach -- BigButton's real, measured size
+            # can exceed the box a squeezed row layout reports owning
+            # (each button still gets its own full sizeHint/minimum,
+            # same "hard floor beats a too-small container" behaviour
+            # ExploreToggle's own overlap fix relies on) -- the real
+            # buttons' own mapped rects are the thing to actually check,
+            # not the row's own geometry(), which can also simply be
+            # stale the instant add_button() just inserted them (QLayout
+            # only recomputes on an activation pass; even an explicit
+            # .activate() call measured as *not* enough here, unlike
+            # _position_stat_group's own equivalent case).
+            top_left = button.mapTo(self, QtCore.QPoint(0, 0))
+            row_right = max(row_right, top_left.x() + button.width())
+            row_bottom = max(row_bottom, top_left.y() + button.height())
+        vertical_overlap = row_bottom > mascot.y()
+        if row_right > 0 and vertical_overlap:
+            available_w = min(available_w, mascot.x() - 6 - row_right - 12)
+        if not _settling and self.button_row.count() > 0:
+            # One deferred re-run once the event loop has actually had a
+            # turn to settle -- the staleness noted above means the very
+            # first pass right after add_button() can still read every
+            # button at a stale (0,0)-ish position, understating row_
+            # bottom enough that vertical_overlap itself computes False
+            # on this pass even on PREDICTION, where it's actually True
+            # (a real, measured regression: gating the re-arm on this
+            # same pass's vertical_overlap meant a wrong first reading
+            # never got a chance to correct itself). Always scheduled
+            # whenever there's a row to (re-)check, not just when this
+            # pass already thinks it needs to -- the same fix
+            # _reposition_thermometer_once_settled already established
+            # for this exact class of problem. `_settling` stops this
+            # scheduling itself again forever once the deferred
+            # correction actually runs.
+            if self._mascot_reposition_timer is None:
+                # Parented to self, not a bare QtCore.QTimer.singleShot():
+                # see _thermometer_reposition_timer's own comment on the
+                # crash a bare one-shot risks after teardown.
+                self._mascot_reposition_timer = QtCore.QTimer(self)
+                self._mascot_reposition_timer.setSingleShot(True)
+                self._mascot_reposition_timer.timeout.connect(
+                    lambda: self._position_mascot(_settling=True))
+            self._mascot_reposition_timer.start(0)
         available_h = max(0, self.height() - mascot.y() - 2)
         width = max(20, min(self.bubble.sizeHint().width(), available_w))
-        self.bubble.fit_to(width, available_h)
         x = mascot.x() - 6 - width
+        # Position and size are always kept current -- even when the
+        # result below is too narrow to be legible and this hides the
+        # bubble -- so anything that reads .geometry() regardless of
+        # visibility (this file's own tests included) never sees a stale
+        # rect left over from before the row existed or from a wider
+        # screen. Hiding, not skipping the update, is what avoids a real
+        # unreadable-sliver bubble (PREDICTION's own real gap can be as
+        # little as ~28px at 800x600, too narrow for legible text at any
+        # font scale -- fit_to() only shrinks height-for-a-given-width)
+        # or, worse, forcing it back into overlapping the row -- the
+        # same "don't render something unreadable" principle this file's
+        # other guards already follow (MeterChip elides rather than
+        # showing garbage; Thermometer._paint_tube draws nothing sooner
+        # than a corrupted shape). Not a real loss when it happens: "Make
+        # a guess..."/a fact line is encouragement, not information the
+        # child needs -- and say() unhides it again next time there's
+        # room, since it always calls bubble.set_text(), which re-shows.
+        self.bubble.fit_to(width, available_h)
         self.bubble.move(int(x), mascot.y())
+        # fit_to() (not a bypassed, uncapped heightForWidth()) either
+        # way -- a real, measured regression the first version of this
+        # hide path had: skipping fit_to() to hide meant nothing capped
+        # the height, and a narrow width you'd want to hide anyway can
+        # still wrap into a very tall box (over 700px on the SCIENCE
+        # phase's own real text, at a 122px width) -- geometry has to
+        # stay sane even when hidden, since this file's own tests (and
+        # potentially other code) read .geometry() regardless of
+        # isVisible().
+        if width < self.bubble._min_width and row_right > 0 and vertical_overlap:
+            self.bubble.hide()
 
     # 12px clear gap above whichever mascot is taller, on top of the 32px
     # margin _position_mascot/_position_scientist already move each
@@ -1271,6 +1440,14 @@ class PublicOverlay(QtWidgets.QWidget):
         for line in dim_lines or []:
             layout.addWidget(Card.text_label(line, dim=True))
         self.card.show()
+        # New content at the card's *current* width doesn't fire a
+        # resizeEvent on its own (see Card._update_minimum_height's own
+        # comment on why this is needed at all) -- called after layout()
+        # has actually placed the new children, so heightForWidth()
+        # reads their real wrapped height, not stale content from
+        # whatever was shown here before.
+        self.card.layout().activate()
+        self.card._update_minimum_height()
 
     def shutdown(self) -> None:
         self.mascot.stop()
