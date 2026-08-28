@@ -1498,12 +1498,28 @@ class MainWindow(QtWidgets.QMainWindow):
         researcher affordance quietly stays visible."""
         if self.welcome_widget is None:
             from public.welcome import WelcomeWidget
-            self.welcome_widget = WelcomeWidget(on_kids=self.enter_public_mode, parent=self)
+            self.welcome_widget = WelcomeWidget(
+                on_kids=self.enter_public_mode,
+                on_grownups=self.launch_researcher_app,
+                parent=self)
             self.root_stack.addWidget(self.welcome_widget)
         self.welcome_widget.retranslate()
         self.menuBar().setVisible(False)
         self.statusBar().setVisible(False)
         self.root_stack.setCurrentWidget(self.welcome_widget)
+
+    def launch_researcher_app(self) -> None:
+        """Grown-ups path off Welcome -- launches FireScope as its own,
+        independent process rather than swapping to an in-process
+        researcher shell (see public/firescope_launcher.py's module
+        docstring for why: FireScope and this kids app are two separate,
+        independently evolving repositories, and launching the real
+        FireScope install is the only way Grown-ups is guaranteed to
+        show whatever is *currently* in it, with no merge/sync step)."""
+        from public.firescope_launcher import launch_firescope
+        started, message = launch_firescope()
+        if not started:
+            QtWidgets.QMessageBox.warning(self, "Couldn't open FireScope", message)
 
     def is_public_mode(self) -> bool:
         return (self.public_experience is not None

@@ -32,13 +32,17 @@ _GROWNUPS_ICON = "🧑"
 
 class WelcomeWidget(QtWidgets.QWidget):
     """"Who's exploring today?" -- a heading and two large touch choices.
-    "Grown-ups" is inert on purpose: researcher access has no route
-    through here yet (see main_window.exit_public_mode's own docstring
-    on why the X must never reach the researcher shell)."""
+    "Grown-ups" launches the real FireScope researcher app as its own,
+    separate process (see public/firescope_launcher.py's module
+    docstring) rather than swapping to an in-process researcher shell --
+    this page still has no route of its own back into an in-process
+    researcher shell (see main_window.exit_public_mode's own docstring
+    on why the X must never reach one)."""
 
-    def __init__(self, on_kids, parent=None):
+    def __init__(self, on_kids, on_grownups, parent=None):
         super().__init__(parent)
         self._on_kids = on_kids
+        self._on_grownups = on_grownups
         # A bare QWidget doesn't paint stylesheet backgrounds on its own --
         # WA_StyledBackground is what makes Qt actually consult the
         # styleSheet during paintEvent instead of just filling the default
@@ -78,12 +82,17 @@ class WelcomeWidget(QtWidgets.QWidget):
         grownups_col = QtWidgets.QVBoxLayout()
         grownups_col.setSpacing(6)
         self.grownups_button = self._make_button(primary=False)
-        self.grownups_button.setEnabled(False)
+        self.grownups_button.clicked.connect(self._on_grownups)
         grownups_col.addWidget(self.grownups_button)
+        # No longer shown -- Grown-ups is live -- but kept constructed
+        # (just hidden, which collapses its layout space) rather than
+        # removed, so a future caption (e.g. a passcode hint) has a slot
+        # ready without re-touching the layout.
         self.coming_soon = QtWidgets.QLabel(self)
         self.coming_soon.setAlignment(QtCore.Qt.AlignCenter)
         self.coming_soon.setStyleSheet(
             f"color: {_TEXT_DIM}; font-size: 12px; font-weight: 600; background: transparent;")
+        self.coming_soon.setVisible(False)
         grownups_col.addWidget(self.coming_soon)
         button_row.addLayout(grownups_col)
 
