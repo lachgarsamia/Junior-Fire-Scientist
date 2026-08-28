@@ -1,10 +1,13 @@
 """Tests for public.firescope_launcher -- the Grown-ups button's process
-launch, kept deliberately independent of FireScope's own repo (see the
-module's docstring). No real subprocess is ever started here: Popen is
-monkeypatched in every launch_firescope() test."""
+launch/activation, kept deliberately independent of FireScope's own repo
+(see the module's docstring). No real subprocess or osascript is ever
+run here: Popen and osascript's subprocess.run are monkeypatched in
+every test that would otherwise touch them."""
 
 import os
 import sys
+
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -52,14 +55,58 @@ class TestFindFireScopeRoot:
         assert launcher.find_firescope_root() is None
 
 
+class TestPidAlive:
+    def test_this_process_is_alive(self):
+        assert launcher.pid_alive(os.getpid()) is True
+
+    def test_a_pid_that_cannot_exist_is_not_alive(self):
+        assert launcher.pid_alive(2**30) is False
+
+
+class TestActivatePid:
+    def test_non_macos_returns_false_without_running_anything(self, monkeypatch):
+        monkeypatch.setattr(launcher.sys, "platform", "linux")
+        calls = []
+        monkeypatch.setattr(launcher.subprocess, "run", lambda *a, **k: calls.append(1))
+        assert launcher.activate_pid(1234) is False
+        assert calls == []
+
+    def test_macos_success(self, monkeypatch):
+        monkeypatch.setattr(launcher.sys, "platform", "darwin")
+
+        class _Result:
+            returncode = 0
+
+        monkeypatch.setattr(launcher.subprocess, "run", lambda *a, **k: _Result())
+        assert launcher.activate_pid(1234) is True
+
+    def test_macos_nonzero_exit_is_false(self, monkeypatch):
+        monkeypatch.setattr(launcher.sys, "platform", "darwin")
+
+        class _Result:
+            returncode = 1
+
+        monkeypatch.setattr(launcher.subprocess, "run", lambda *a, **k: _Result())
+        assert launcher.activate_pid(1234) is False
+
+    def test_osascript_missing_is_reported_not_raised(self, monkeypatch):
+        monkeypatch.setattr(launcher.sys, "platform", "darwin")
+
+        def raise_oserror(*a, **k):
+            raise OSError("no such file")
+
+        monkeypatch.setattr(launcher.subprocess, "run", raise_oserror)
+        assert launcher.activate_pid(1234) is False
+
+
 class TestLaunchFireScope:
     def test_missing_install_fails_with_honest_message(self, monkeypatch):
         monkeypatch.setattr(launcher, "find_firescope_root", lambda: None)
-        started, message = launcher.launch_firescope()
-        assert started is False
+        process, message = launcher.launch_firescope()
+        assert process is None
         assert "FIRESCOPE_APP_PATH" in message
 
-    def test_success_calls_popen_with_correct_cwd_and_pythonpath(self, tmp_path, monkeypatch):
+    def test_success_calls_popen_with_correct_cwd_pythonpath_and_pid(self, tmp_path, monkeypatch):
         root = _make_fake_firescope(tmp_path)
         monkeypatch.setattr(launcher, "find_firescope_root", lambda: root)
         # A real, always-present path so the "configured python exists"
@@ -67,24 +114,24 @@ class TestLaunchFireScope:
         monkeypatch.setenv("FIRESCOPE_PYTHON", sys.executable)
 
         calls = {}
+        sentinel = object()
 
         def fake_popen(args, cwd=None, env=None, **kwargs):
             calls["args"] = args
             calls["cwd"] = cwd
             calls["env"] = env
             calls["start_new_session"] = kwargs.get("start_new_session")
-            class _Proc:
-                pass
-            return _Proc()
+            return sentinel
 
         monkeypatch.setattr(launcher.subprocess, "Popen", fake_popen)
-        started, message = launcher.launch_firescope()
+        process, message = launcher.launch_firescope()
 
-        assert started is True
+        assert process is sentinel
         assert message == ""
         assert calls["cwd"] == str(root / "src")
         assert calls["args"][-1] == "main.py"
         assert calls["env"]["PYTHONPATH"] == str(root / "src")
+        assert calls["env"]["JUNIOR_FIRE_SCIENTIST_PID"] == str(os.getpid())
         assert calls["start_new_session"] is True
 
     def test_falls_back_to_this_interpreter_when_configured_python_missing(self, tmp_path, monkeypatch):
@@ -96,14 +143,12 @@ class TestLaunchFireScope:
 
         def fake_popen(args, cwd=None, env=None, **kwargs):
             calls["args"] = args
-            class _Proc:
-                pass
-            return _Proc()
+            return object()
 
         monkeypatch.setattr(launcher.subprocess, "Popen", fake_popen)
-        started, message = launcher.launch_firescope()
+        process, message = launcher.launch_firescope()
 
-        assert started is True
+        assert process is not None
         assert calls["args"][0] == sys.executable
 
     def test_popen_oserror_is_reported_not_raised(self, tmp_path, monkeypatch):
@@ -114,7 +159,7 @@ class TestLaunchFireScope:
             raise OSError("no such file or directory")
 
         monkeypatch.setattr(launcher.subprocess, "Popen", fake_popen)
-        started, message = launcher.launch_firescope()
+        process, message = launcher.launch_firescope()
 
-        assert started is False
+        assert process is None
         assert "Couldn't start FireScope" in message

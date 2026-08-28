@@ -1074,6 +1074,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.shell_widget = shell
         self.public_experience = None
         self.welcome_widget = None
+        self._firescope_process = None  # launch_researcher_app's own tracked child, if any
         self.root_stack = QtWidgets.QStackedWidget()
         self.root_stack.addWidget(shell)
         self.setCentralWidget(self.root_stack)
@@ -1515,11 +1516,29 @@ class MainWindow(QtWidgets.QMainWindow):
         docstring for why: FireScope and this kids app are two separate,
         independently evolving repositories, and launching the real
         FireScope install is the only way Grown-ups is guaranteed to
-        show whatever is *currently* in it, with no merge/sync step)."""
-        from public.firescope_launcher import launch_firescope
-        started, message = launch_firescope()
-        if not started:
+        show whatever is *currently* in it, with no merge/sync step).
+
+        Remembers the launched process (self._firescope_process) across
+        clicks: if Grown-ups is clicked again while that process is
+        still alive, this activates its window instead of starting a
+        second FireScope -- no duplicate windows piling up from repeat
+        clicks. Only replaces the remembered process on an actual fresh
+        launch, so a failed activation attempt (window closed some other
+        way, or non-macOS) correctly falls through to relaunching."""
+        from public.firescope_launcher import activate_pid, launch_firescope
+
+        existing = self._firescope_process
+        if existing is not None and existing.poll() is None:
+            if activate_pid(existing.pid):
+                return
+            # Activation failed (not macOS, or its window is gone some
+            # other way) -- fall through and launch a fresh one below.
+
+        process, message = launch_firescope()
+        if process is None:
             QtWidgets.QMessageBox.warning(self, "Couldn't open FireScope", message)
+            return
+        self._firescope_process = process
 
     def is_public_mode(self) -> bool:
         return (self.public_experience is not None

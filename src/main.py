@@ -28,11 +28,17 @@ def _icon_or_none(filename: str) -> QtGui.QIcon:
 def main():
     # `--public` boots straight into the Fire Explorer, for an unattended
     # exhibition machine: a kiosk should never come up showing the
-    # researcher UI, however briefly. Parsed by hand rather than with
+    # researcher UI, however briefly. `--welcome` boots onto the Welcome
+    # landing page instead -- otherwise unreachable at startup (it's only
+    # ever shown as the "you exited Fire Explorer" destination via
+    # exit_public_mode) -- for FireScope's own Back button
+    # (kids_app_launcher.py there) to land on, and for anyone testing the
+    # Welcome/Grown-ups flow directly. Parsed by hand rather than with
     # argparse to keep every other Qt argument passing through to
     # QApplication untouched.
     public_mode = "--public" in sys.argv
-    qt_argv = [a for a in sys.argv if a != "--public"]
+    welcome_mode = "--welcome" in sys.argv
+    qt_argv = [a for a in sys.argv if a not in ("--public", "--welcome")]
 
     app = QtWidgets.QApplication(qt_argv)
     # Native styles (e.g. macOS Aqua) paint *disabled* controls themselves
@@ -90,6 +96,8 @@ def main():
         # After show(), so the experience's scene has a real size to lay
         # its first frame out against.
         window.enter_public_mode()
+    elif welcome_mode:
+        window._show_welcome()
     sys.exit(app.exec_())
 
 

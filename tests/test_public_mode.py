@@ -3032,6 +3032,118 @@ class TestPublicModeIntegration:
             window.close()
 
 
+class TestGrownupsLaunch:
+    """launch_researcher_app -- the Welcome page's Grown-ups button (see
+    public/firescope_launcher.py's module docstring for why this
+    launches FireScope as a separate process rather than swapping to an
+    in-process shell)."""
+
+    def test_first_click_launches_and_remembers_the_process(self, qapp, monkeypatch):
+        import public.firescope_launcher as launcher
+
+        window = MainWindow(load_simulation_data())
+        try:
+            sentinel = object()
+            monkeypatch.setattr(launcher, "launch_firescope", lambda: (sentinel, ""))
+
+            window.launch_researcher_app()
+
+            assert window._firescope_process is sentinel
+        finally:
+            window.close()
+
+    def test_second_click_while_still_alive_activates_instead_of_relaunching(self, qapp, monkeypatch):
+        import public.firescope_launcher as launcher
+
+        window = MainWindow(load_simulation_data())
+        try:
+            class _FakeProcess:
+                pid = 4242
+                def poll(self):
+                    return None  # still running
+
+            window._firescope_process = _FakeProcess()
+            activated = []
+            monkeypatch.setattr(
+                launcher, "activate_pid", lambda pid: activated.append(pid) or True)
+            relaunched = []
+            monkeypatch.setattr(
+                launcher, "launch_firescope",
+                lambda: relaunched.append(True) or (object(), ""))
+
+            window.launch_researcher_app()
+
+            assert activated == [4242]
+            assert relaunched == []
+        finally:
+            window.close()
+
+    def test_click_after_process_exited_launches_fresh(self, qapp, monkeypatch):
+        import public.firescope_launcher as launcher
+
+        window = MainWindow(load_simulation_data())
+        try:
+            class _FakeProcess:
+                pid = 4242
+                def poll(self):
+                    return 0  # already exited
+
+            window._firescope_process = _FakeProcess()
+            fresh = object()
+            monkeypatch.setattr(launcher, "launch_firescope", lambda: (fresh, ""))
+            activated = []
+            monkeypatch.setattr(launcher, "activate_pid", lambda pid: activated.append(pid) or True)
+
+            window.launch_researcher_app()
+
+            assert activated == []
+            assert window._firescope_process is fresh
+        finally:
+            window.close()
+
+    def test_failed_activation_falls_back_to_a_fresh_launch(self, qapp, monkeypatch):
+        """Activation can fail even for a genuinely alive process (not
+        macOS, or its window is gone some other way) -- must not silently
+        do nothing in that case."""
+        import public.firescope_launcher as launcher
+
+        window = MainWindow(load_simulation_data())
+        try:
+            class _FakeProcess:
+                pid = 4242
+                def poll(self):
+                    return None
+
+            window._firescope_process = _FakeProcess()
+            monkeypatch.setattr(launcher, "activate_pid", lambda pid: False)
+            fresh = object()
+            monkeypatch.setattr(launcher, "launch_firescope", lambda: (fresh, ""))
+
+            window.launch_researcher_app()
+
+            assert window._firescope_process is fresh
+        finally:
+            window.close()
+
+    def test_launch_failure_shows_a_warning_not_a_crash(self, qapp, monkeypatch):
+        import public.firescope_launcher as launcher
+
+        window = MainWindow(load_simulation_data())
+        try:
+            monkeypatch.setattr(
+                launcher, "launch_firescope", lambda: (None, "not installed"))
+            warned = []
+            monkeypatch.setattr(
+                QtWidgets.QMessageBox, "warning", lambda *a, **k: warned.append(True))
+
+            window.launch_researcher_app()  # must not raise
+
+            assert warned == [True]
+            assert window._firescope_process is None
+        finally:
+            window.close()
+
+
 # ------------------------------------------------- interactive laboratory
 class TestTemperatureProbe:
     """Tap-to-inspect: PublicScene.probe_at() must return a real measured
