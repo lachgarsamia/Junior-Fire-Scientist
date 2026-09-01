@@ -2677,6 +2677,32 @@ class TestManifestPortability:
 
 # ----------------------------------------------------------- mode switch
 class TestPublicModeIntegration:
+    def test_entering_public_mode_in_demo_mode_does_not_crash(self, qapp, monkeypatch):
+        """Regression test for a real crash, not a guessed one: found via
+        a live cdb (WinDbg) repro on Windows, where PyQt5 treats an
+        uncaught Python exception inside a Qt slot as fatal and aborts
+        the whole process -- which looked identical every time (same
+        Qt5Core.dll offset, 0xc0000409/STATUS_STACK_BUFFER_OVERRUN) and
+        was misdiagnosed as native memory corruption before the real
+        traceback was captured. DemoScenarioStore implemented get(),
+        is_cached(), and get_extent() (see is_cached()'s own docstring
+        for the same "gap never got the M2.1 treatment" history) but
+        never get_times() -- PublicScene.load_case() calls it
+        unconditionally, so clicking Kids (or any other enter_public_mode
+        path) with no real fds/sim_stage1_prep/ data crashed before any
+        Kids-mode UI could paint. Same monkeypatch DemoScenarioStore
+        regression tests already use (test_demo_mode_scenario_toggle_does_
+        not_crash) to force demo mode without a real dataset."""
+        monkeypatch.setattr("data_provider.list_scenario_folders", lambda *a, **kw: [])
+        sim_data = load_simulation_data()
+        assert sim_data.is_demo
+        window = MainWindow(sim_data)
+        try:
+            window.enter_public_mode()  # must not raise
+            assert window.is_public_mode()
+        finally:
+            window.close()
+
     def test_enter_and_exit_restores_the_researcher_shell(self, qapp):
         window = MainWindow(load_simulation_data())
         try:

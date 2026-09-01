@@ -123,6 +123,22 @@ class DemoScenarioStore:
         # footprint so cursor probing still produces readable coordinates.
         return [0.0, 1.0, 0.0, 0.48]
 
+    def get_times(self, scenario_index: int, key=None) -> np.ndarray:
+        # Same pre-existing-gap class as is_cached() above: ScenarioStore.
+        # get_times() (added later, M2.1/M2.2) never got the same demo-mode
+        # implementation -- PublicScene.load_case() calls it unconditionally,
+        # so entering Fire Explorer in demo mode raised AttributeError before
+        # any Kids-mode UI could paint (found via a real crash repro, not
+        # guessed -- PyQt5 treats an uncaught exception in a Qt slot as
+        # fatal and aborts the process, which is why it looked like native
+        # memory corruption rather than a plain Python bug on Windows).
+        # Synthetic timestamps at the same fixed cadence real demo-mode
+        # data already uses (SimulationData.timesteps_per_second is
+        # FRAMES_PER_SECOND for is_demo=True -- see load_simulation_data()
+        # below), so a frame index maps to a time the same way it would for
+        # real data.
+        return np.arange(self.n_timesteps, dtype=float) / FRAMES_PER_SECOND
+
 
 def load_simulation_data(cache_size: int = SCENARIO_CACHE_SIZE) -> SimulationData:
     """Load real FDS scenario data if present under fds/sim/, else fall back to demo data.
