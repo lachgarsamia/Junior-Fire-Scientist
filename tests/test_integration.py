@@ -983,8 +983,8 @@ class TestIntegration:
         """Demo mode has no real .smv to discover quantities from -- the
         combo must degrade to a single disabled TEMPERATURE entry rather
         than crash or silently offer a non-functional VELOCITY option."""
-        monkeypatch.setattr("data_provider.list_scenario_folders", lambda *a, **kw: [])
-        sim_data = load_simulation_data()
+        monkeypatch.setattr("data_provider.SIM_ROOT", "/nonexistent-fds-sim")
+        sim_data = load_simulation_data(allow_demo=True)
         assert sim_data.is_demo
         window = MainWindow(sim_data)
         assert window.quantity_combo.count() == 1
@@ -997,8 +997,8 @@ class TestIntegration:
         so any scenario-param toggle in demo mode raised AttributeError
         before this fix (found opportunistically while making the store
         interface key-aware for M2.1)."""
-        monkeypatch.setattr("data_provider.list_scenario_folders", lambda *a, **kw: [])
-        sim_data = load_simulation_data()
+        monkeypatch.setattr("data_provider.SIM_ROOT", "/nonexistent-fds-sim")
+        sim_data = load_simulation_data(allow_demo=True)
         assert sim_data.is_demo
         window = MainWindow(sim_data)
         window.candle_toggle.set_value(1)
@@ -1148,8 +1148,8 @@ class TestIntegration:
     def test_grid_layout_switch_works_in_demo_mode(self, qapp, monkeypatch):
         """Demo mode has no manifest -- grid cells default to case_index 0
         with disabled scenario combos, but the grid itself must still work."""
-        monkeypatch.setattr("data_provider.list_scenario_folders", lambda *a, **kw: [])
-        sim_data = load_simulation_data()
+        monkeypatch.setattr("data_provider.SIM_ROOT", "/nonexistent-fds-sim")
+        sim_data = load_simulation_data(allow_demo=True)
         assert sim_data.is_demo
         window = MainWindow(sim_data)
         window._set_grid_layout("2x2")
@@ -1465,8 +1465,8 @@ class TestIntegration:
         window.close()
 
     def test_demo_mode_still_gets_a_stable_extent(self, qapp, monkeypatch):
-        monkeypatch.setattr("data_provider.list_scenario_folders", lambda *a, **kw: [])
-        sim_data = load_simulation_data()
+        monkeypatch.setattr("data_provider.SIM_ROOT", "/nonexistent-fds-sim")
+        sim_data = load_simulation_data(allow_demo=True)
         assert sim_data.is_demo
         window = MainWindow(sim_data)
         assert window.view_grid.active_view()._extent is not None
@@ -1686,8 +1686,8 @@ class TestIntegration:
         window.close()
 
     def test_analytics_panel_absent_in_demo_mode(self, qapp, monkeypatch):
-        monkeypatch.setattr("data_provider.list_scenario_folders", lambda *a, **kw: [])
-        sim_data = load_simulation_data()
+        monkeypatch.setattr("data_provider.SIM_ROOT", "/nonexistent-fds-sim")
+        sim_data = load_simulation_data(allow_demo=True)
         assert sim_data.is_demo
         window = MainWindow(sim_data)
         assert window.analytics_panel is None

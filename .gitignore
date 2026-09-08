@@ -1,37 +1,50 @@
 # Python
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
 *.egg-info/
 build/
 dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
 
 # macOS
 .DS_Store
 
 # IDE
 .vscode/
+.idea/
 
 # Logs
 *.log
 
-# Test runner caches
+# Test / lint / type-check caches
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .coverage
+htmlcov/
 
-# Data: simulation outputs are large (2.3G) and regenerable; test fixtures
-# under tests/fixtures/ carry the data needed by the test suite.
-fds/sim/
+# Simulation output (~11 GB) -- provided separately, see the README.
+# Covers a real fds/sim/ directory, a symlink to a shared copy, and any
+# local dataset backup kept next to it. tests/fixtures/ carries the
+# trimmed data the test suite needs.
+fds/sim
+fds/sim*/
 
-# Large media assets from the 2019 outreach event (425M + 647M)
+# Large media assets from the 2019 outreach event (425M + 647M). The one
+# application asset drawn from here (the FZJ logo) is tracked separately
+# at src/logo/logo_fzj.svg.
 banner/
 image_video_sim/
 
-# Runtime caches and ML outputs (see ROADMAP.md §8)
+# Runtime caches and ML outputs
 .cache/
 predictions/
 
-# M3.2 training artifacts (regenerable from ml/ scripts + ml/README.md,
+# ML training artifacts (regenerable from ml/ scripts + ml/README.md,
 # not source -- checkpoints are large binary blobs unsuited to git)
 ml/checkpoints/
 ml/runs/
@@ -47,8 +60,7 @@ report/*.lot
 report/*.synctex.gz
 protocol/*.synctex.gz
 
-# Personal internship report -- not part of the tracked project report
-# (report/report.tex / report/report.pdf)
+# Personal internship report -- not part of this project's documentation
 report/internship_report.*
 
 # Stray pasted screenshot

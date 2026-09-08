@@ -69,14 +69,14 @@ def scan_scenarios(sim_root: str) -> list:
     its actual position among what's really on disk, not an assumed count.
 
     A folder name may carry an arbitrary trailing suffix after its
-    c<n>_d<n>_vod<n>_voc<n> stem (e.g. FireScope's Pleiades staging
-    layout writes both an input-prep stub "c1_d0_vod0_voc0" and its real
-    output under "c1_d0_vod0_voc0_stage1_pleiades" -- see load_data.py's
-    SIM_ROOT). When two folder names share the same stem, only the
-    longer (more specific) name is kept as that scenario's entry; this
-    stays a pure name comparison, no disk access beyond the directory
-    listing list_scenario_folders() already did, matching this module's
-    existing "names only, not contents" scanning contract.
+    c<n>_d<n>_vod<n>_voc<n> stem (e.g. the cluster-run output directories
+    are named "c1_d0_vod0_voc0_stage1_pleiades", and a dataset may also
+    carry a bare "c1_d0_vod0_voc0" input-prep stub alongside). When two
+    folder names share the same stem, only the longer (more specific)
+    name is kept as that scenario's entry; this stays a pure name
+    comparison, no disk access beyond the directory listing
+    list_scenario_folders() already did, matching this module's existing
+    "names only, not contents" scanning contract.
     """
     folders = list_scenario_folders(sim_root)
 

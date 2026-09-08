@@ -15,26 +15,12 @@ logger = logging.getLogger(__name__)
 # (its cross-validated unit); only this display-facing loader scales.
 SOOT_DISPLAY_SCALE = 1.0e6
 
-# fds/sim/ is resolved relative to this file, not the process cwd, so the
-# loader works regardless of where the application is launched from.
+# The dataset always lives at <repo>/fds/sim/, resolved relative to this
+# file rather than the process cwd so the app works from any directory.
+# fds/sim/ is not in git (it is large and provided separately) -- see the
+# README.
 _SRC_DIR = os.path.dirname(os.path.abspath(__file__))
-_LOCAL_SIM_ROOT = os.path.join(_SRC_DIR, '..', 'fds', 'sim')
-
-# The candle-factorial study now runs on Pleiades (see
-# FireScope/fds/sim_stage1_prep/manifest.json, which already maps each
-# c<n>_d<n>_vod<n>_voc<n> case to its "..._stage1_pleiades" output folder)
-# rather than the local fds/sim/ checkout that data was originally
-# generated into. Preferred by default when present on this machine so the
-# app shows the current runs, not the older local set; FDSVIS_SIM_ROOT
-# overrides either, and a machine without that checkout (CI, another
-# developer) transparently falls back to fds/sim/.
-_PLEIADES_SIM_ROOT = "/Users/samialachgar/Desktop/FireScope/fds/sim_stage1_prep"
-if os.environ.get('FDSVIS_SIM_ROOT'):
-    SIM_ROOT = os.environ['FDSVIS_SIM_ROOT']
-elif os.path.isdir(_PLEIADES_SIM_ROOT):
-    SIM_ROOT = _PLEIADES_SIM_ROOT
-else:
-    SIM_ROOT = _LOCAL_SIM_ROOT
+SIM_ROOT = os.path.normpath(os.path.join(_SRC_DIR, os.pardir, 'fds', 'sim'))
 
 # Deprecated aliases for DEFAULT_SLICE_KEY's fields -- kept because
 # ScenarioStore's disk-cache filenames were already built from these names

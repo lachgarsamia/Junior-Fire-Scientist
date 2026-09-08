@@ -12,21 +12,27 @@ scenario_store.py) -- eager loading took 36s and ~450MB just for the array;
 lazy loading takes ~2s and ~115MB for the default scenario. This module wraps
 ScenarioStore directly so that improvement isn't undone.
 
-If the real dataset (fds/sim/) is not present, a synthetic demo dataset is
-generated so the app is still runnable and demonstrable -- clearly labeled
-as demo data in the window title and status bar, never silently.
+The dataset lives at <repo>/fds/sim/ and is mapped by its manifest.json.
+It is provided separately from the repository (see the README), so
+load_simulation_data() raises a clear DataLoadError when it is missing
+rather than silently substituting anything. A synthetic demo dataset is
+still available, but only to callers that explicitly ask for it with
+allow_demo=True.
 """
 
+import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 import numpy as np
 
 from config import N_CANDLES, N_DOORS, N_VOD, N_VOC, FRAMES_PER_SECOND, SCENARIO_CACHE_SIZE
-from load_data import check_scenario_count, SIM_ROOT
-from scenario_store import ScenarioStore, list_scenario_folders, build_data_matrix
-from manifest import get_manifest, data_matrix_from_manifest, scan_study
+from load_data import SIM_ROOT
+from scenario_store import ScenarioStore, build_data_matrix
+from manifest import load_manifest, data_matrix_from_manifest, scan_study
+
+logger = logging.getLogger(__name__)
 
 
 class DataLoadError(Exception):
@@ -140,46 +146,73 @@ class DemoScenarioStore:
         return np.arange(self.n_timesteps, dtype=float) / FRAMES_PER_SECOND
 
 
-def load_simulation_data(cache_size: int = SCENARIO_CACHE_SIZE) -> SimulationData:
-    """Load real FDS scenario data if present under fds/sim/, else fall back to demo data.
+DATASET_MISSING_DETAIL = (
+    "Expected:\n"
+    "  ./fds/sim/\n\n"
+    "Please copy the provided FDS simulation dataset into that directory."
+)
 
-    Raises DataLoadError with a user-facing message on unrecoverable failure
-    (e.g. fds/sim/ exists but a scenario's files are missing/corrupt).
+
+def _entries_from_manifest(manifest_path: str) -> list:
+    """Read fds/sim/manifest.json and point each scenario at its directory
+    inside the local fds/sim/. The manifest records the absolute path each
+    scenario had when it was written, so a dataset copied in from elsewhere
+    would otherwise still point at the machine it came from -- we keep only
+    the directory name and rebase it onto this repo's fds/sim/.
     """
-    try:
-        folders = list_scenario_folders()
-    except Exception as e:
-        raise DataLoadError(
-            "Something went wrong while looking for simulation data.",
-            f"Original error: {type(e).__name__}: {e}") from e
+    sim_root = os.path.dirname(manifest_path)
+    entries = []
+    for e in load_manifest(manifest_path):
+        leaf = os.path.basename(os.path.normpath(e.path)) or e.folder
+        local = os.path.join(sim_root, leaf)
+        if not os.path.isdir(local):
+            raise DataLoadError(
+                "The FDS dataset is incomplete.",
+                f"fds/sim/manifest.json lists '{leaf}', but fds/sim/{leaf}/ is missing.")
+        entries.append(replace(e, path=local))
+    expected = N_CANDLES * N_DOORS * N_VOD * N_VOC
+    if len(entries) != expected:
+        logger.warning("fds/sim/manifest.json lists %d scenarios, expected %d",
+                       len(entries), expected)
+    return entries
 
-    if not folders:
-        data_matrix = build_data_matrix(N_CANDLES, N_DOORS, N_VOD, N_VOC)
-        demo_store = DemoScenarioStore(n_scenarios=N_CANDLES * N_DOORS * N_VOD * N_VOC)
-        return SimulationData(store=demo_store, data_matrix=data_matrix,
-                               timesteps_per_second=FRAMES_PER_SECOND, is_demo=True)
+
+def _demo_simulation_data() -> SimulationData:
+    data_matrix = build_data_matrix(N_CANDLES, N_DOORS, N_VOD, N_VOC)
+    demo_store = DemoScenarioStore(n_scenarios=N_CANDLES * N_DOORS * N_VOD * N_VOC)
+    return SimulationData(store=demo_store, data_matrix=data_matrix,
+                          timesteps_per_second=FRAMES_PER_SECOND, is_demo=True)
+
+
+def load_simulation_data(cache_size: int = SCENARIO_CACHE_SIZE,
+                         allow_demo: bool = False) -> SimulationData:
+    """Load the FDS scenario dataset from fds/sim/, mapped by its manifest.json.
+
+    Raises DataLoadError if fds/sim/manifest.json is missing. Pass
+    allow_demo=True to get a synthetic dataset instead in that case --
+    only for callers that knowingly run without the real data (some tests).
+    """
+    manifest_path = os.path.join(SIM_ROOT, 'manifest.json')
+
+    if not os.path.isfile(manifest_path):
+        if allow_demo:
+            return _demo_simulation_data()
+        raise DataLoadError("FDS dataset not found.", DATASET_MISSING_DETAIL)
 
     try:
-        check_scenario_count(len(folders), N_CANDLES, N_DOORS, N_VOD, N_VOC)
-        entries = get_manifest(SIM_ROOT)
-        # folders passed to ScenarioStore must be case_index-aligned with
-        # the manifest's data_matrix; deriving them from entries (rather
-        # than re-using the `folders` list above) keeps that alignment
-        # exact even if scan_scenarios() had to skip an unrecognized folder
-        # name that list_scenario_folders() still included.
-        manifest_folders = [e.path for e in entries]
+        entries = _entries_from_manifest(manifest_path)
+        folders = [e.path for e in entries]
         data_matrix = data_matrix_from_manifest(entries)
         cache_dir = os.path.join(SIM_ROOT, '.cache')
-        store = ScenarioStore(manifest_folders, cache_size=cache_size, cache_dir=cache_dir)
+        store = ScenarioStore(folders, cache_size=cache_size, cache_dir=cache_dir)
         return SimulationData(store=store, data_matrix=data_matrix,
                                timesteps_per_second=FRAMES_PER_SECOND, is_demo=False,
                                manifest=entries)
+    except DataLoadError:
+        raise
     except Exception as e:
         raise DataLoadError(
             "Something went wrong while loading the simulation data.",
-            "Check that the dataset was downloaded and unpacked correctly (git-lfs). "
-            "To unpack split archives on Linux/macOS:\n"
-            "cat sim.tar.gz.a* > ./sim.tar.gz && tar -xf sim.tar.gz\n\n"
             f"Original error: {type(e).__name__}: {e}") from e
 
 

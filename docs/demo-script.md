@@ -57,8 +57,7 @@ sits next to. Written for a presenter who wants to run the whole demo without to
   "Cinematic fire view" toggle every cell already listens to, not new per-cell state.
 - **Demo-data fallback:** if `fds/sim/` isn't found (e.g. a scenario folder got unplugged/moved), the
   app falls back to generated demo data rather than crashing — re-verify this path still renders
-  correctly through the cinematic pipeline before the demo, not just the plain heatmap, since Phase 2
-  added a lot of pipeline surface since this fallback was last exercised end to end.
+  correctly through the cinematic pipeline before the demo, not just the plain heatmap.
 - **Mid-playback scenario-folder unplug:** rehearse actually disconnecting/renaming the dataset
   folder while a scenario is mid-playback, to see what the presenter sees and how to recover
   (restart the app onto demo data) without a live crash.
@@ -66,11 +65,10 @@ sits next to. Written for a presenter who wants to run the whole demo without to
 ## Performance rehearsal (do this on the actual demo laptop, not a dev machine)
 
 - 30+ minute unattended soak with the cinematic pipeline on: watch process RSS for leaks, watch for
-  stutters. (The M2.4 lesson: offscreen/dev-machine FPS numbers overstate real-display performance —
-  re-measure on the real hardware, don't trust a laptop-vs-demo-rig assumption.)
+  stutters. Offscreen/dev-machine FPS numbers overstate real-display performance — always re-measure
+  on the actual demo hardware rather than trusting a laptop-vs-demo-rig assumption.
 - Confirm no thermal throttling kicks in over that soak on the specific machine being used.
-- Full visual QA pass in both the dark and theatre themes side by side (screenshot-diff discipline
-  from the GUI-modernization pass) — check every page, not just Live.
+- Full visual QA pass in both the dark and theatre themes side by side — check every page, not just Live.
 
 ## Success criteria
 

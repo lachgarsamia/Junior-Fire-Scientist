@@ -676,7 +676,7 @@ class TestScienceCard:
         equivalent 459 -> 428 °C change stayed under the flame metric's
         noticeable-delta threshold. Re-pinned honestly rather than forcing
         the old "about the same" expectation on different real numbers
-        (see load_data.py's SIM_ROOT switch to the Pleiades runs)."""
+        (see the move to the Pleiades dataset)."""
         sim = load_simulation_data()
         if sim.is_demo:
             pytest.skip("real dataset not present")
@@ -783,7 +783,7 @@ class TestSecondaryMetric:
             # On the current production (Pleiades) dataset, flame_temp's
             # relative change (~12.6%) outranks room_temp's (~8.3%) -- an
             # earlier, now-superseded local dataset ranked them the other
-            # way. See load_data.py's SIM_ROOT switch to the Pleiades runs.
+            # way. See the move to the Pleiades dataset.
             assert secondary.metric.key == "flame_temp"
             assert secondary.relative_change < hero.relative_change
         finally:
@@ -2103,10 +2103,10 @@ class TestSootVersusTemperatureProxy:
     """History: why the public smoke used to be temperature-derived, and
     the real numbers that made that stop being defensible.
 
-    On the sim_stage1_prep dataset (the higher-fidelity Pleiades re-run,
-    see load_data.SIM_ROOT), real SOOT DENSITY is dense -- ~98-99% plane
-    occupancy by the end of a run, reaching the ceiling, not the ~0.6-0.8%
-    thread-above-the-candle the original decision measured. The remaining
+    On the Pleiades dataset (the higher-fidelity cluster re-run), real
+    SOOT DENSITY is dense -- ~98-99% plane occupancy by the end of a run,
+    reaching the ceiling, not the ~0.6-0.8% thread-above-the-candle the
+    original decision measured. The remaining
     blocker documented here at the time -- SOOT DENSITY's own `.s3d`
     output schedule (1001 frames) not matching TEMPERATURE/VELOCITY's
     `.sf` rate (481 frames) over the same ~120s run, so naive index
@@ -2689,12 +2689,12 @@ class TestPublicModeIntegration:
         for the same "gap never got the M2.1 treatment" history) but
         never get_times() -- PublicScene.load_case() calls it
         unconditionally, so clicking Kids (or any other enter_public_mode
-        path) with no real fds/sim_stage1_prep/ data crashed before any
+        path) with no real fds/sim/ data crashed before any
         Kids-mode UI could paint. Same monkeypatch DemoScenarioStore
         regression tests already use (test_demo_mode_scenario_toggle_does_
         not_crash) to force demo mode without a real dataset."""
-        monkeypatch.setattr("data_provider.list_scenario_folders", lambda *a, **kw: [])
-        sim_data = load_simulation_data()
+        monkeypatch.setattr("data_provider.SIM_ROOT", "/nonexistent-fds-sim")
+        sim_data = load_simulation_data(allow_demo=True)
         assert sim_data.is_demo
         window = MainWindow(sim_data)
         try:

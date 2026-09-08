@@ -9,7 +9,7 @@ import os
 
 from PyQt5 import QtCore, QtWidgets
 
-_LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "banner", "img", "logo_fzj.svg")
+_LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo", "logo_fzj.svg")
 _ASPECT = 246.61 / 136.06  # the SVG's own viewBox width/height
 
 

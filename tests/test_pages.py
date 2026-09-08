@@ -99,8 +99,8 @@ class TestMainWindowPageSwitching:
         instead of crashing -- regression for a real bug found where the
         Analysis page's on_enter() callback assumed attributes that only
         exist when a manifest is present."""
-        monkeypatch.setattr("data_provider.list_scenario_folders", lambda *a, **kw: [])
-        sim_data = load_simulation_data()
+        monkeypatch.setattr("data_provider.SIM_ROOT", "/nonexistent-fds-sim")
+        sim_data = load_simulation_data(allow_demo=True)
         assert sim_data.is_demo
         window = MainWindow(sim_data)
         for key in ("home", "compare", "dataset", "analysis", "export", "live"):
