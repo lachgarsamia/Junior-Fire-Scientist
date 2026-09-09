@@ -80,6 +80,8 @@ takes a few minutes. Every later launch is just:
 ./run.sh
 ```
 
+This opens the welcome page with the **Kids** and **Grown-ups** buttons.
+
 ## If something goes wrong
 
 **"FDS dataset not found"** — the dataset isn't where the app expects it.
@@ -117,12 +119,15 @@ and redo step 2.
 
 ## For developers
 
-Run the app in one of its other modes:
+`./run.sh` opens the welcome page (passes `--welcome`). To boot straight into
+the Public Fire Explorer kiosk instead:
 
 ```
-./run.sh --public      # Public Fire Explorer (kiosk/exhibit mode)
-./run.sh --welcome     # Welcome / "Grown-ups" landing page
+./run.sh --public
 ```
+
+The researcher UI is `src/main.py` with no flags — run that file directly if
+you need it without the welcome page.
 
 Tests (the environment must already be set up by `run.sh`):
 

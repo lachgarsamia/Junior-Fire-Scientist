@@ -54,4 +54,7 @@ if ! "$PYTHON" -m pip show fdsvis >/dev/null 2>&1; then
 fi
 
 echo "Launching Junior Fire Scientist"
+if [ "$#" -eq 0 ]; then
+    set -- --welcome
+fi
 exec env PYTHONPATH="$REPO_DIR/src" "$PYTHON" src/main.py "$@"
