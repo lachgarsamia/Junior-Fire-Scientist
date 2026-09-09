@@ -46,17 +46,21 @@ directory. If you end up with `fds/sim/sim/`, you copied one level too deep.
 
 ### If you also use FireScope
 
-Keep a single copy of the dataset. Put the real dataset in FireScope's
-`fds/sim/`, then point Junior Fire Scientist at it with a symlink:
+Keep a single copy of the dataset. FireScope already reads it from its own
+`fds/` directory — point Junior Fire Scientist at that same directory with a
+symlink instead of copying 11 GB again:
 
 ```bash
-ln -s /path/to/FireScope/fds/sim \
-      /path/to/Junior-Fire-Scientist/fds/sim
+ln -s /absolute/path/to/FireScope/fds/sim_stage1_prep \
+      /absolute/path/to/Junior-Fire-Scientist/fds/sim
 ```
 
-Both applications then read the exact same files, with no second 11 GB copy.
-Junior Fire Scientist does not know or care that it is a symlink — it only
-needs `fds/sim/manifest.json` to resolve.
+(Use whichever directory your FireScope loads — the one containing
+`manifest.json` and the `*_stage1_pleiades` scenario folders.)
+
+Both applications then read the exact same files. Junior Fire Scientist does
+not know or care that it is a symlink — it only needs `fds/sim/manifest.json`
+to resolve. Use absolute paths so the link doesn't break.
 
 ### Verify
 
