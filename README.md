@@ -153,7 +153,3 @@ The loader reads `fds/sim/manifest.json` to map the 24 scenarios to their
 candle/door/vent factor levels, locating each scenario by directory name inside
 `fds/sim/`. See [`docs/architecture.md`](docs/architecture.md) and
 [`docs/fds-data.md`](docs/fds-data.md) for more.
-
-The "Grown-ups" button in the Public Fire Explorer optionally launches a
-separate researcher application, FireScope, if it is installed alongside this
-repository. It is not required for Junior Fire Scientist or its dataset.
